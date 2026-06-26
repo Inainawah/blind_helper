@@ -32,6 +32,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -302,6 +308,14 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
                         }
                     },
                     modifier = Modifier
+                        .semantics {
+                            contentDescription =
+                                if (isFlashlightOn)
+                                    "手電筒已開啟，點兩下關閉"
+                                else
+                                    "手電筒已關閉，點兩下開啟"
+                            role = Role.Button
+                        }
                         .size(45.dp)
                         .clip(CircleShape)
                         .background(Color(0xAA1E1E1E))
