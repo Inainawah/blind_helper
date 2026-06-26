@@ -94,6 +94,9 @@ dependencies {
 
   //任務四優化：補上手機端 GPU 加速與神經網路 API 支持
   implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
+  implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+  implementation("org.tensorflow:tensorflow-lite:2.14.0")
+
 }
 
 
