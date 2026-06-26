@@ -8,10 +8,13 @@ import java.nio.ByteOrder
 
 class YoloDetector(private val context: Context, private val modelPath: String) {
     private var interpreter: Interpreter? = null
-    
+
     private val inputWidth = 640
     private val inputHeight = 640
-    private val numBytesPerChannel = 4 // Float32
+
+    //任務四優化：自動辨識模型檔名有沒有包含 int8
+    private val isQuantized = modelPath.contains("int8", ignoreCase = true)
+    private val numBytesPerChannel = if (isQuantized) 1 else 4 // INT8 模型用 1 byte，Float32 模型用 4 bytes
 
     // Class names mapping (same as python CLASS_NAME_TW)
     val classNamesTw = mapOf(
@@ -60,8 +63,21 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
     // Area thresholds for 2-meter warnings (box area on 640x640 resolution)
     val areaThresholds2M = mapOf(
         "person" to 69000f, "umbrella" to 47000f, "chair" to 36000f, "table" to 9000f,
-        "bottle" to 1300f, "backpack" to 12000f, "couch" to 267000f, "suitcase" to 60500f
+        "bottle" to 1300f, "backpack" to 12000f, "couch" to 267000f, "suitcase" to 60500f,
+        // === 新加入的戶外致命與動態障礙物 ===
+        "motorcycle" to 95000f,
+        "bicycle" to 45000f,
+        "car" to 310000f,
+        "bus" to 450000f,
+        "truck" to 420000f,
+        "fire hydrant" to 8500f,
+        "stop sign" to 15000f,
+        "potted plant" to 18000f,
+        "dog" to 22000f,
+        "cat" to 8000f
     )
+
+
     val defaultArea2M = 3500f
 
     data class Detection(
@@ -89,7 +105,7 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
             val startOffset = fileDescriptor.startOffset
             val declaredLength = fileDescriptor.declaredLength
             val modelBuffer = fileChannel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
-            
+
             interpreter = Interpreter(modelBuffer, options)
             android.util.Log.d("YoloDetector", "YOLO model loaded natively: $modelPath")
         } catch (e: Exception) {
@@ -113,9 +129,20 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
         for (i in 0 until inputWidth) {
             for (j in 0 until inputHeight) {
                 val value = intValues[pixel++]
-                byteBuffer.putFloat(((value shr 16) and 0xFF) / 255.0f)
-                byteBuffer.putFloat(((value shr 8) and 0xFF) / 255.0f)
-                byteBuffer.putFloat((value and 0xFF) / 255.0f)
+                val r = (value ushr 16) and 0xFF
+                val g = (value ushr 8) and 0xFF
+                val b = value and 0xFF
+
+                //任務四優化：根據模型種類分配像素寫入方式，防止記憶體與格式錯誤
+                if (isQuantized) {
+                    byteBuffer.put((r - 128).toByte())
+                    byteBuffer.put((g - 128).toByte())
+                    byteBuffer.put((b - 128).toByte())
+                } else {
+                    byteBuffer.putFloat(r / 255.0f)
+                    byteBuffer.putFloat(g / 255.0f)
+                    byteBuffer.putFloat(b / 255.0f)
+                }
             }
         }
 
