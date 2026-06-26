@@ -5,13 +5,18 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.hardware.camera2.CaptureRequest
 import android.speech.tts.TextToSpeech
+import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.*
@@ -109,14 +114,17 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
         }
     }
 
-    // Initialize YOLO Detector
+    // Initialize YOLO Detector and Hazard Tracker
     val detector = remember { YoloDetector(context, "yolo26s_float32.tflite") }
+    val tracker = remember { HazardTracker() }
 
     // State parameters
     var detections by remember { mutableStateOf<List<YoloDetector.Detection>>(emptyList()) }
     var isFlashlightOn by remember { mutableStateOf(false) }
     var camera by remember { mutableStateOf<Camera?>(null) }
     val alertLogs = remember { mutableStateListOf<AlertLog>() }
+    var lastSpokenClassId by remember { mutableStateOf(-1) }
+    var lastSpokenPriority by remember { mutableStateOf(0f) }
 
     // Pulse animation for status indicator
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
@@ -130,33 +138,66 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
         label = "alpha"
     )
 
-    // Trigger TTS and logs when danger is detected
+    // Trigger TTS and logs when danger is detected (Priority & Preemption Logic)
     LaunchedEffect(detections) {
-        val dangerDetections = detections.filter { it.isDanger }
-        val closestDanger = dangerDetections.maxByOrNull { it.proximity }
-        
-        if (closestDanger != null && ttsInitialized) {
-            val currentTime = System.currentTimeMillis()
-            val lockedUntil = lastAlertFinishedTime.get()
-            
-            if (currentTime >= lockedUntil) {
-                val name = closestDanger.labelTw
-                val alertMsg = "注意，前方有 $name"
-                
-                // Estimate speaking duration (approx. 350ms per character + 500ms buffer) + 3 seconds cooldown
-                val estimatedSpeechDurationMs = alertMsg.length * 350L + 500L
-                val cooldownMs = 3000L
-                lastAlertFinishedTime.set(currentTime + estimatedSpeechDurationMs + cooldownMs)
-                
-                tts?.speak(alertMsg, TextToSpeech.QUEUE_FLUSH, null, "alert_${currentTime}")
+        if (!ttsInitialized) return@LaunchedEffect
 
-                // Add to scrollable logs
-                val timeStamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-                if (alertLogs.size > 20) {
-                    alertLogs.removeAt(alertLogs.size - 1)
-                }
-                alertLogs.add(0, AlertLog(System.currentTimeMillis(), "危險警告: 前方有 $name", timeStamp))
+        // Track the detections and obtain their rates of area change
+        val trackedResults = tracker.update(detections)
+        if (trackedResults.isEmpty()) return@LaunchedEffect
+
+        // Calculate a composite priority score for each tracked threat
+        val prioritizedThreats = trackedResults.map { (det, rate) ->
+            val proximity = det.proximity
+            val rateFactor = if (rate > 0f) rate / 15000f else 0f
+            val priority = proximity * (1f + rateFactor)
+            Triple(det, rate, priority)
+        }
+
+        // Find the highest priority threat
+        val highestPriorityThreat = prioritizedThreats.maxByOrNull { it.third } ?: return@LaunchedEffect
+        val (det, rate, priority) = highestPriorityThreat
+
+        val currentTime = System.currentTimeMillis()
+        val lockedUntil = lastAlertFinishedTime.get()
+
+        // Urgent threat: rapid approach (rate >= 20000) or high priority (priority >= 2.5)
+        val isUrgent = rate >= 20000f || priority >= 2.5f
+
+        // Cooldown Preemption Rule: Urgent hazards immediately bypass the 3s cooldown
+        // if they represent a new class OR a significant increase in priority (>0.5) for the same class.
+        val shouldPreempt = isUrgent && (det.classId != lastSpokenClassId || priority >= lastSpokenPriority + 0.5f)
+
+        if (currentTime >= lockedUntil || shouldPreempt) {
+            val name = det.labelTw
+            val alertMsg = if (isUrgent) {
+                "緊急！前方有 $name 快速靠近"
+            } else {
+                "注意，前方有 $name"
             }
+
+            // Shorten cooldown for urgent preemptive alerts to remain highly responsive
+            val estimatedSpeechDurationMs = alertMsg.length * 350L + 500L
+            val cooldownMs = if (isUrgent) 1000L else 3000L
+            lastAlertFinishedTime.set(currentTime + estimatedSpeechDurationMs + cooldownMs)
+            
+            lastSpokenClassId = det.classId
+            lastSpokenPriority = priority
+
+            // Use QUEUE_FLUSH to preempt immediately
+            tts?.speak(alertMsg, TextToSpeech.QUEUE_FLUSH, null, "alert_${currentTime}")
+
+            // Log entry
+            val timeStamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+            if (alertLogs.size > 20) {
+                alertLogs.removeAt(alertLogs.size - 1)
+            }
+            val logMessage = if (isUrgent) {
+                "🔴 緊急警告: $name 快速靠近 (優先度: ${String.format("%.1f", priority)})"
+            } else {
+                "⚠️ 危險警告: 前方有 $name (優先度: ${String.format("%.1f", priority)})"
+            }
+            alertLogs.add(0, AlertLog(System.currentTimeMillis(), logMessage, timeStamp))
         }
     }
 
@@ -167,7 +208,7 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // 1. CameraX PreviewView
+        // 1. CameraX PreviewView with optimized Camera2 settings
         AndroidView(
             factory = { ctx ->
                 val previewView = PreviewView(ctx).apply {
@@ -178,21 +219,60 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
                 cameraProviderFuture.addListener({
                     val cameraProvider = cameraProviderFuture.get()
 
-                    val preview = Preview.Builder().build().also {
+                    // Configure Preview with Camera2 autofocus & motion blur reduction controls
+                    val previewBuilder = Preview.Builder()
+                    val previewExtender = Camera2Interop.Extender(previewBuilder)
+                    previewExtender.setCaptureRequestOption(
+                        CaptureRequest.CONTROL_AF_MODE,
+                        CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                    )
+                    previewExtender.setCaptureRequestOption(
+                        CaptureRequest.CONTROL_MODE,
+                        CaptureRequest.CONTROL_MODE_USE_SCENE_MODE
+                    )
+                    previewExtender.setCaptureRequestOption(
+                        CaptureRequest.CONTROL_SCENE_MODE,
+                        CaptureRequest.CONTROL_SCENE_MODE_ACTION
+                    )
+                    val preview = previewBuilder.build().also {
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
 
-                    val imageAnalysis = ImageAnalysis.Builder()
+                    // Configure ImageAnalysis with target 640x640 resolution
+                    val resolutionSelector = ResolutionSelector.Builder()
+                        .setResolutionStrategy(
+                            ResolutionStrategy(
+                                Size(640, 640),
+                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                            )
+                        )
+                        .build()
+
+                    val imageAnalysisBuilder = ImageAnalysis.Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                        .build()
+                        .setResolutionSelector(resolutionSelector)
+
+                    val analysisExtender = Camera2Interop.Extender(imageAnalysisBuilder)
+                    analysisExtender.setCaptureRequestOption(
+                        CaptureRequest.CONTROL_AF_MODE,
+                        CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                    )
+                    analysisExtender.setCaptureRequestOption(
+                        CaptureRequest.CONTROL_MODE,
+                        CaptureRequest.CONTROL_MODE_USE_SCENE_MODE
+                    )
+                    analysisExtender.setCaptureRequestOption(
+                        CaptureRequest.CONTROL_SCENE_MODE,
+                        CaptureRequest.CONTROL_SCENE_MODE_ACTION
+                    )
+                    val imageAnalysis = imageAnalysisBuilder.build()
 
                     imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
                         val bitmap = imageProxy.toBitmap()
                         if (bitmap != null) {
-                            val rotationDegrees = imageProxy.imageInfo.rotationDegrees.toFloat()
-                            val rotatedBitmap = rotateBitmap(bitmap, rotationDegrees)
-                            val results = detector.detect(rotatedBitmap)
+                            val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+                            val results = detector.detect(bitmap, rotationDegrees)
                             detections = results
                         }
                         imageProxy.close()

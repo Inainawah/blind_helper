@@ -96,6 +96,4 @@ dependencies {
   implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
 }
 
-configurations.all {
-    exclude(group = "org.tensorflow", module = "tensorflow-lite-support-api")
-}
+
