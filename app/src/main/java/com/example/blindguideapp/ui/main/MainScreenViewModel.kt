@@ -23,5 +23,11 @@ sealed interface MainScreenUiState {
 
   data class Error(val throwable: Throwable) : MainScreenUiState
 
-  data class Success(val data: List<String>) : MainScreenUiState
+  data class Success(
+    val data: List<String>,
+    val isListening: Boolean = false,
+    val detectedObject: String = "尚未偵測",
+    val distance: Float = 0f,
+    val alertMessage: String = ""
+  ) : MainScreenUiState
 }
