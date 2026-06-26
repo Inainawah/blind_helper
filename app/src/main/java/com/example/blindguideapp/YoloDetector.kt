@@ -3,15 +3,24 @@ package com.example.blindguideapp
 import android.content.Context
 import android.graphics.Bitmap
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.DataType
+import org.tensorflow.lite.support.image.TensorImage
+import org.tensorflow.lite.support.image.ImageProcessor
+import org.tensorflow.lite.support.image.ops.ResizeOp
+import org.tensorflow.lite.support.image.ops.Rot90Op
+import org.tensorflow.lite.support.common.ops.NormalizeOp
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 class YoloDetector(private val context: Context, private val modelPath: String) {
     private var interpreter: Interpreter? = null
-    
+
     private val inputWidth = 640
     private val inputHeight = 640
-    private val numBytesPerChannel = 4 // Float32
+
+    //任務四優化：自動辨識模型檔名有沒有包含 int8
+    private val isQuantized = modelPath.contains("int8", ignoreCase = true)
+    private val numBytesPerChannel = if (isQuantized) 1 else 4 // INT8 模型用 1 byte，Float32 模型用 4 bytes
 
     // Class names mapping (same as python CLASS_NAME_TW)
     val classNamesTw = mapOf(
@@ -60,9 +69,41 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
     // Area thresholds for 2-meter warnings (box area on 640x640 resolution)
     val areaThresholds2M = mapOf(
         "person" to 69000f, "umbrella" to 47000f, "chair" to 36000f, "table" to 9000f,
-        "bottle" to 1300f, "backpack" to 12000f, "couch" to 267000f, "suitcase" to 60500f
+        "bottle" to 1300f, "backpack" to 12000f, "couch" to 267000f, "suitcase" to 60500f,
+        // === 新加入的戶外致命與動態障礙物 ===
+        "motorcycle" to 95000f,
+        "bicycle" to 45000f,
+        "car" to 310000f,
+        "bus" to 450000f,
+        "truck" to 420000f,
+        "fire hydrant" to 8500f,
+        "stop sign" to 15000f,
+        "potted plant" to 18000f,
+        "dog" to 22000f,
+        "cat" to 8000f
     )
+
+
     val defaultArea2M = 3500f
+
+    data class AspectRatioRange(val min: Float?, val max: Float?)
+
+    val aspectLimitMap = mapOf(
+        "person" to AspectRatioRange(min = 0.1f, max = 1.0f),
+        "traffic light" to AspectRatioRange(min = 0.1f, max = 0.8f),
+        "fire hydrant" to AspectRatioRange(min = 0.2f, max = 1.2f),
+        "stop sign" to AspectRatioRange(min = 0.6f, max = 1.5f),
+        "bench" to AspectRatioRange(min = 1.0f, max = null),
+        "backpack" to AspectRatioRange(min = 0.3f, max = 2.0f),
+        "umbrella" to AspectRatioRange(min = 0.3f, max = 3.0f),
+        "handbag" to AspectRatioRange(min = 0.4f, max = 2.5f),
+        "suitcase" to AspectRatioRange(min = 0.4f, max = 2.5f),
+        "chair" to AspectRatioRange(min = 0.3f, max = 2.0f),
+        "couch" to AspectRatioRange(min = 1.0f, max = null),
+        "dining table" to AspectRatioRange(min = 0.8f, max = null),
+        "pole" to AspectRatioRange(min = null, max = 0.4f),
+        "manhole" to AspectRatioRange(min = 1.5f, max = null)
+    )
 
     data class Detection(
         val x1: Float,
@@ -89,7 +130,7 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
             val startOffset = fileDescriptor.startOffset
             val declaredLength = fileDescriptor.declaredLength
             val modelBuffer = fileChannel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
-            
+
             interpreter = Interpreter(modelBuffer, options)
             android.util.Log.d("YoloDetector", "YOLO model loaded natively: $modelPath")
         } catch (e: Exception) {
@@ -97,27 +138,28 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
         }
     }
 
-    fun detect(bitmap: Bitmap): List<Detection> {
+    fun detect(bitmap: Bitmap, rotationDegrees: Int): List<Detection> {
         val interp = interpreter ?: return emptyList()
 
-        // 1. Rescale & preprocessing
-        val resizedBitmap = Bitmap.createScaledBitmap(bitmap, inputWidth, inputHeight, true)
-        val byteBuffer = ByteBuffer.allocateDirect(1 * inputWidth * inputHeight * 3 * numBytesPerChannel).apply {
-            order(ByteOrder.nativeOrder())
-        }
+        // 1. Efficient preprocessing using TFLite Support Library
+        val tensorImage = TensorImage(if (isQuantized) DataType.UINT8 else DataType.FLOAT32)
+        tensorImage.load(bitmap)
 
-        val intValues = IntArray(inputWidth * inputHeight)
-        resizedBitmap.getPixels(intValues, 0, resizedBitmap.width, 0, 0, resizedBitmap.width, resizedBitmap.height)
+        // Convert clockwise rotation to counter-clockwise for Rot90Op
+        val k = (360 - rotationDegrees) % 360 / 90
 
-        var pixel = 0
-        for (i in 0 until inputWidth) {
-            for (j in 0 until inputHeight) {
-                val value = intValues[pixel++]
-                byteBuffer.putFloat(((value shr 16) and 0xFF) / 255.0f)
-                byteBuffer.putFloat(((value shr 8) and 0xFF) / 255.0f)
-                byteBuffer.putFloat((value and 0xFF) / 255.0f)
+        val imageProcessor = ImageProcessor.Builder()
+            .add(ResizeOp(inputWidth, inputHeight, ResizeOp.ResizeMethod.BILINEAR))
+            .apply {
+                if (k > 0) {
+                    add(Rot90Op(k))
+                }
             }
-        }
+            .add(if (isQuantized) NormalizeOp(128f, 1f) else NormalizeOp(0f, 255f))
+            .build()
+
+        val processedImage = imageProcessor.process(tensorImage)
+        val byteBuffer = processedImage.buffer
 
         // Output shape is [1, 300, 6]
         val outputBuffer = Array(1) { Array(300) { FloatArray(6) } }
@@ -154,8 +196,17 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
             // Calculate pixel area in 640x640 space
             val w = (rx2 - rx1) * 640f
             val h = (ry2 - ry1) * 640f
-            val area = w * h
+            
+            // Aspect ratio filter to reduce false positives
+            if (w <= 0f || h <= 0f) continue
+            val aspectRatio = w / h
+            val limit = aspectLimitMap[labelEn]
+            if (limit != null) {
+                if (limit.min != null && aspectRatio < limit.min) continue
+                if (limit.max != null && aspectRatio > limit.max) continue
+            }
 
+            val area = w * h
             val threshold = areaThresholds2M[labelEn] ?: defaultArea2M
             val isDanger = area >= threshold
             val proximity = area / threshold
