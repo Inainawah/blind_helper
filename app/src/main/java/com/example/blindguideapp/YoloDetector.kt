@@ -82,7 +82,7 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
         "dog" to 22000f,
         "cat" to 8000f
     )
-    val defaultArea2M = 3500f
+
 
     data class AspectRatioRange(val min: Float?, val max: Float?)
 
