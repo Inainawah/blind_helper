@@ -82,8 +82,6 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
         "dog" to 22000f,
         "cat" to 8000f
     )
-
-
     val defaultArea2M = 3500f
 
     data class AspectRatioRange(val min: Float?, val max: Float?)
@@ -207,7 +205,13 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
             }
 
             val area = w * h
-            val threshold = areaThresholds2M[labelEn] ?: defaultArea2M
+            // 1. 檢查這個物件有沒有在我們的設定清單裡，如果沒有，直接跳過不偵測！
+            val threshold = areaThresholds2M[labelEn]
+            if (threshold == null) {
+                continue // 清單外的不必要物品（如長頸鹿、微波爐），直接無視，不加入偵測清單
+            }
+
+            // 2. 有在清單內，才計算有沒有達到 2 公尺的危險距離
             val isDanger = area >= threshold
             val proximity = area / threshold
 
