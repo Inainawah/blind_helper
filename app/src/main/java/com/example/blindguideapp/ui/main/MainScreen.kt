@@ -23,6 +23,8 @@ import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -133,7 +135,7 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
     val alertLogs = remember { mutableStateListOf<AlertLog>() }
     var lastSpokenClassId by remember { mutableStateOf(-1) }
     var lastSpokenPriority by remember { mutableStateOf(0f) }
-
+    var isListening by remember { mutableStateOf(false) }
     // Pulse animation for status indicator
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val alphaAnim by infiniteTransition.animateFloat(
@@ -751,6 +753,15 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    HoldToTalkButton(
+        isListening = isListening,
+        onPressStart = {
+            isListening = true
+        },
+        onPressEnd = {
+            isListening = false
+        }
+    )
                     // Danger indicator if any danger items detected
                     val dangerousItems = detections.filter { it.isDanger }
                     val closestDangerItem = dangerousItems.maxByOrNull { it.proximity }
@@ -850,7 +861,53 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
         }
     }
 }
-
+@Composable
+fun HoldToTalkButton(
+    isListening: Boolean,
+    onPressStart: () -> Unit,
+    onPressEnd: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(70.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(
+                if (isListening) Color(0xFF4DD0E1)
+                else Color(0xFF1E1E1E)
+            )
+            .border(
+                width = 2.dp,
+                color = if (isListening) Color(0xFF4DD0E1) else Color(0xFFFFD54F),
+                shape = RoundedCornerShape(18.dp)
+            )
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = {
+                        onPressStart()
+                        tryAwaitRelease()
+                        onPressEnd()
+                    }
+                )
+            }
+            .semantics {
+                contentDescription =
+                    if (isListening)
+                        "正在聆聽，放開後停止語音輸入"
+                    else
+                        "按住說話，說出目的地"
+                role = Role.Button
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = if (isListening) "🎙 正在聆聽..." else "🎙 按住說話",
+            color = if (isListening) Color.Black else Color.White,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
 @Composable
 fun PermissionDeniedScreen(onRequestPermission: () -> Unit) {
     Box(
