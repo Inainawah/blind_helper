@@ -113,7 +113,8 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
         val labelTw: String,
         val labelEn: String,
         val isDanger: Boolean,
-        val proximity: Float
+        val proximity: Float,
+        val distanceMeters: Float = 0f
     )
 
     init {
@@ -172,7 +173,7 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
         for (i in 0 until 300) {
             val box = rawOutputs[i]
             val confidence = box[4]
-            if (confidence < 0.30f) continue // Filter confidence <= 30%
+            if (confidence < 0.45f) continue // Filter confidence <= 45%
 
             val classId = box[5].toInt()
             val labelEn = classNamesEn[classId] ?: "unknown"
@@ -214,6 +215,8 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
             // 2. 有在清單內，才計算有沒有達到 2 公尺的危險距離
             val isDanger = area >= threshold
             val proximity = area / threshold
+            // Estimate default distance from area ratio: at proximity=1.0, distance is 2.0 meters
+            val distanceMeters = 2.0f / (proximity.coerceAtLeast(0.01f))
 
             detections.add(
                 Detection(
@@ -226,7 +229,8 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
                     labelTw = labelTw,
                     labelEn = labelEn,
                     isDanger = isDanger,
-                    proximity = proximity
+                    proximity = proximity,
+                    distanceMeters = distanceMeters
                 )
             )
         }
