@@ -125,7 +125,7 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
     }
 
     // Initialize YOLO Detector and Hazard Tracker
-    val detector = remember { YoloDetector(context, "yolo26m.tflite") }
+    val detector = remember { YoloDetector(context, "yolo26s_float32.tflite") }
     val tracker = remember { HazardTracker() }
 
     // State parameters
@@ -180,11 +180,7 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
 
         if (currentTime >= lockedUntil || shouldPreempt) {
             val name = det.labelTw
-            val alertMsg = if (isUrgent) {
-                "緊急！前方有 $name 快速靠近"
-            } else {
-                "注意，前方有 $name"
-            }
+            val alertMsg = "前方有 $name"
 
             // Shorten cooldown for urgent preemptive alerts to remain highly responsive
             val estimatedSpeechDurationMs = alertMsg.length * 350L + 500L
