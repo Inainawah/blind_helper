@@ -525,7 +525,7 @@ Spacer(modifier = Modifier.height(16.dp))
                                     fontSize = 14.sp
                                 )
                                 Text(
-                                    text = closestDangerItem.labelTw,
+                                    text = "${closestDangerItem.labelTw} (${String.format("%.1f", closestDangerItem.distanceMeters)}公尺)",
                                     color = Color(0xFFB71C1C),
                                     fontSize = 12.sp
                                 )
@@ -810,7 +810,7 @@ Spacer(modifier = Modifier.height(16.dp))
                                     fontSize = 15.sp
                                 )
                                 Text(
-                                    text = "偵測到最接近: " + closestDangerItem.labelTw,
+                                    text = "偵測到最接近: ${closestDangerItem.labelTw} (${String.format("%.1f", closestDangerItem.distanceMeters)}公尺)",
                                     color = Color(0xFFB71C1C),
                                     fontSize = 13.sp
                                 )
