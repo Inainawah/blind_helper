@@ -60,19 +60,6 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
 
-// Depth AI Import
-import com.example.blindguideapp.ui.main.DepthEstimator
-import android.media.Image
-import android.graphics.ImageFormat
-import android.graphics.YuvImage
-import android.graphics.Rect
-import android.graphics.BitmapFactory
-import java.io.ByteArrayOutputStream
-import android.app.Activity
-import android.content.ContextWrapper
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-
 data class AlertLog(val id: Long, val message: String, val timestamp: String)
 
 @Composable
@@ -137,9 +124,8 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
         }
     }
 
-    // Initialize YOLO Detector, Depth Estimator, and Hazard Tracker
+    // Initialize YOLO Detector and Hazard Tracker
     val detector = remember { YoloDetector(context, "yolo26s_float32.tflite") }
-    val depthEstimator = remember { DepthEstimator(context, "midas_2_1_small_quant.tflite") }
     val tracker = remember { HazardTracker() }
 
     // State parameters
@@ -150,12 +136,6 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
     var lastSpokenClassId by remember { mutableStateOf(-1) }
     var lastSpokenPriority by remember { mutableStateOf(0f) }
     var isListening by remember { mutableStateOf(false) }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            depthEstimator.close()
-        }
-    }
     // Pulse animation for status indicator
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val alphaAnim by infiniteTransition.animateFloat(
@@ -200,11 +180,10 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
 
         if (currentTime >= lockedUntil || shouldPreempt) {
             val name = det.labelTw
-            val distance = det.distanceMeters
             val alertMsg = if (isUrgent) {
-                "緊急！前方有 $name 快速靠近，距離 ${String.format("%.1f", distance)} 公尺"
+                "緊急！前方有 $name 快速靠近"
             } else {
-                "注意，前方有 $name，距離 ${String.format("%.1f", distance)} 公尺"
+                "注意，前方有 $name"
             }
 
             // Shorten cooldown for urgent preemptive alerts to remain highly responsive
@@ -224,9 +203,9 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
                 alertLogs.removeAt(alertLogs.size - 1)
             }
             val logMessage = if (isUrgent) {
-                "🔴 緊急警告: $name 快速靠近 (距離: ${String.format("%.1f", distance)}米, 優先度: ${String.format("%.1f", priority)})"
+                "🔴 緊急警告: $name 快速靠近 (優先度: ${String.format("%.1f", priority)})"
             } else {
-                "⚠️ 危險警告: 前方有 $name (距離: ${String.format("%.1f", distance)}米, 優先度: ${String.format("%.1f", priority)})"
+                "⚠️ 危險警告: 前方有 $name (優先度: ${String.format("%.1f", priority)})"
             }
             alertLogs.add(0, AlertLog(System.currentTimeMillis(), logMessage, timeStamp))
         }
@@ -318,12 +297,93 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
                         .border(2.dp, Color.White.copy(alpha = 0.3f))
                         .background(Color.Black)
                 ) {
-                    CameraXView(
-                        detector = detector,
-                        depthEstimator = depthEstimator,
-                        isFlashlightOn = isFlashlightOn,
-                        onDetectionsUpdated = { detections = it },
-                        onCameraBind = { camera = it },
+                    // CameraX PreviewView with optimized Camera2 settings
+                    AndroidView(
+                        factory = { ctx ->
+                            val previewView = PreviewView(ctx).apply {
+                                scaleType = PreviewView.ScaleType.FILL_CENTER
+                            }
+
+                            val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+                            cameraProviderFuture.addListener({
+                                val cameraProvider = cameraProviderFuture.get()
+
+                                // Configure Preview with Camera2 autofocus & motion blur reduction controls
+                                val previewBuilder = Preview.Builder()
+                                val previewExtender = Camera2Interop.Extender(previewBuilder)
+                                previewExtender.setCaptureRequestOption(
+                                    CaptureRequest.CONTROL_AF_MODE,
+                                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                                )
+                                previewExtender.setCaptureRequestOption(
+                                    CaptureRequest.CONTROL_MODE,
+                                    CaptureRequest.CONTROL_MODE_USE_SCENE_MODE
+                                )
+                                previewExtender.setCaptureRequestOption(
+                                    CaptureRequest.CONTROL_SCENE_MODE,
+                                    CaptureRequest.CONTROL_SCENE_MODE_ACTION
+                                )
+                                val preview = previewBuilder.build().also {
+                                    it.setSurfaceProvider(previewView.surfaceProvider)
+                                }
+
+                                // Configure ImageAnalysis with target 640x640 resolution
+                                val resolutionSelector = ResolutionSelector.Builder()
+                                    .setResolutionStrategy(
+                                        ResolutionStrategy(
+                                            Size(640, 640),
+                                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                                        )
+                                    )
+                                    .build()
+
+                                val imageAnalysisBuilder = ImageAnalysis.Builder()
+                                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                                    .setResolutionSelector(resolutionSelector)
+
+                                val analysisExtender = Camera2Interop.Extender(imageAnalysisBuilder)
+                                analysisExtender.setCaptureRequestOption(
+                                    CaptureRequest.CONTROL_AF_MODE,
+                                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                                )
+                                analysisExtender.setCaptureRequestOption(
+                                    CaptureRequest.CONTROL_MODE,
+                                    CaptureRequest.CONTROL_MODE_USE_SCENE_MODE
+                                )
+                                analysisExtender.setCaptureRequestOption(
+                                    CaptureRequest.CONTROL_SCENE_MODE,
+                                    CaptureRequest.CONTROL_SCENE_MODE_ACTION
+                                )
+                                val imageAnalysis = imageAnalysisBuilder.build()
+
+                                imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                                    val bitmap = imageProxy.toBitmap()
+                                    if (bitmap != null) {
+                                        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+                                        val results = detector.detect(bitmap, rotationDegrees)
+                                        detections = results
+                                    }
+                                    imageProxy.close()
+                                }
+
+                                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+                                try {
+                                    cameraProvider.unbindAll()
+                                    camera = cameraProvider.bindToLifecycle(
+                                        lifecycleOwner,
+                                        cameraSelector,
+                                        preview,
+                                        imageAnalysis
+                                    )
+                                } catch (e: Exception) {
+                                    android.util.Log.e("CameraLayout", "Use case binding failed", e)
+                                }
+                            }, ContextCompat.getMainExecutor(ctx))
+
+                            previewView
+                        },
                         modifier = Modifier.fillMaxSize()
                     )
 
@@ -399,6 +459,12 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
                             if (currentCamera != null && currentCamera.cameraInfo.hasFlashUnit()) {
                                 isFlashlightOn = !isFlashlightOn
                                 currentCamera.cameraControl.enableTorch(isFlashlightOn)
+                                tts?.speak(
+    if (isFlashlightOn) "手電筒已開啟" else "手電筒已關閉",
+    TextToSpeech.QUEUE_FLUSH,
+    null,
+    "flashlight_${System.currentTimeMillis()}"
+)
                             }
                         },
                         modifier = Modifier
@@ -448,7 +514,7 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
                                     fontSize = 14.sp
                                 )
                                 Text(
-                                    text = "${closestDangerItem.labelTw} (${String.format("%.1f", closestDangerItem.distanceMeters)}公尺)",
+                                    text = closestDangerItem.labelTw,
                                     color = Color(0xFFB71C1C),
                                     fontSize = 12.sp
                                 )
@@ -498,15 +564,96 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .aspectRatio(1f)
+                        .height(300.dp)
                         .background(Color.Black)
                 ) {
-                    CameraXView(
-                        detector = detector,
-                        depthEstimator = depthEstimator,
-                        isFlashlightOn = isFlashlightOn,
-                        onDetectionsUpdated = { detections = it },
-                        onCameraBind = { camera = it },
+                    // CameraX PreviewView with optimized Camera2 settings
+                    AndroidView(
+                        factory = { ctx ->
+                            val previewView = PreviewView(ctx).apply {
+                                scaleType = PreviewView.ScaleType.FILL_CENTER
+                            }
+
+                            val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+                            cameraProviderFuture.addListener({
+                                val cameraProvider = cameraProviderFuture.get()
+
+                                // Configure Preview with Camera2 autofocus & motion blur reduction controls
+                                val previewBuilder = Preview.Builder()
+                                val previewExtender = Camera2Interop.Extender(previewBuilder)
+                                previewExtender.setCaptureRequestOption(
+                                    CaptureRequest.CONTROL_AF_MODE,
+                                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                                )
+                                previewExtender.setCaptureRequestOption(
+                                    CaptureRequest.CONTROL_MODE,
+                                    CaptureRequest.CONTROL_MODE_USE_SCENE_MODE
+                                )
+                                previewExtender.setCaptureRequestOption(
+                                    CaptureRequest.CONTROL_SCENE_MODE,
+                                    CaptureRequest.CONTROL_SCENE_MODE_ACTION
+                                )
+                                val preview = previewBuilder.build().also {
+                                    it.setSurfaceProvider(previewView.surfaceProvider)
+                                }
+
+                                // Configure ImageAnalysis with target 640x640 resolution
+                                val resolutionSelector = ResolutionSelector.Builder()
+                                    .setResolutionStrategy(
+                                        ResolutionStrategy(
+                                            Size(640, 640),
+                                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                                        )
+                                    )
+                                    .build()
+
+                                val imageAnalysisBuilder = ImageAnalysis.Builder()
+                                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                                    .setResolutionSelector(resolutionSelector)
+
+                                val analysisExtender = Camera2Interop.Extender(imageAnalysisBuilder)
+                                analysisExtender.setCaptureRequestOption(
+                                    CaptureRequest.CONTROL_AF_MODE,
+                                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                                )
+                                analysisExtender.setCaptureRequestOption(
+                                    CaptureRequest.CONTROL_MODE,
+                                    CaptureRequest.CONTROL_MODE_USE_SCENE_MODE
+                                )
+                                analysisExtender.setCaptureRequestOption(
+                                    CaptureRequest.CONTROL_SCENE_MODE,
+                                    CaptureRequest.CONTROL_SCENE_MODE_ACTION
+                                )
+                                val imageAnalysis = imageAnalysisBuilder.build()
+
+                                imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                                    val bitmap = imageProxy.toBitmap()
+                                    if (bitmap != null) {
+                                        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+                                        val results = detector.detect(bitmap, rotationDegrees)
+                                        detections = results
+                                    }
+                                    imageProxy.close()
+                                }
+
+                                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+                                try {
+                                    cameraProvider.unbindAll()
+                                    camera = cameraProvider.bindToLifecycle(
+                                        lifecycleOwner,
+                                        cameraSelector,
+                                        preview,
+                                        imageAnalysis
+                                    )
+                                } catch (e: Exception) {
+                                    android.util.Log.e("CameraLayout", "Use case binding failed", e)
+                                }
+                            }, ContextCompat.getMainExecutor(ctx))
+
+                            previewView
+                        },
                         modifier = Modifier.fillMaxSize()
                     )
 
@@ -580,6 +727,12 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
                                 if (currentCamera != null && currentCamera.cameraInfo.hasFlashUnit()) {
                                     isFlashlightOn = !isFlashlightOn
                                     currentCamera.cameraControl.enableTorch(isFlashlightOn)
+                                    tts?.speak(
+    if (isFlashlightOn) "手電筒已開啟" else "手電筒已關閉",
+    TextToSpeech.QUEUE_FLUSH,
+    null,
+    "flashlight_${System.currentTimeMillis()}"
+)
                                 }
                             },
                             modifier = Modifier
@@ -646,7 +799,7 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
                                     fontSize = 15.sp
                                 )
                                 Text(
-                                    text = "偵測到最接近: ${closestDangerItem.labelTw} (${String.format("%.1f", closestDangerItem.distanceMeters)}公尺)",
+                                    text = "偵測到最接近: " + closestDangerItem.labelTw,
                                     color = Color(0xFFB71C1C),
                                     fontSize = 13.sp
                                 )
@@ -658,7 +811,7 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .weight(1f)
+                            .height(160.dp)
                             .clip(RoundedCornerShape(18.dp))
                             .background(Color(0xBC1E1E1E))
                             .border(1.dp, Color(0x22FFFFFF), RoundedCornerShape(18.dp))
@@ -816,182 +969,4 @@ fun rotateBitmap(bitmap: Bitmap, degrees: Float): Bitmap {
     if (degrees == 0f) return bitmap
     val matrix = Matrix().apply { postRotate(degrees) }
     return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-}
-
-@Composable
-fun CameraXView(
-    detector: YoloDetector,
-    depthEstimator: DepthEstimator,
-    isFlashlightOn: Boolean,
-    onDetectionsUpdated: (List<YoloDetector.Detection>) -> Unit,
-    onCameraBind: (Camera?) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
-    var boundCamera by remember { mutableStateOf<Camera?>(null) }
-
-    val dangerThresholdsMeters = remember {
-        mapOf(
-            "car" to 3.0f,
-            "motorcycle" to 3.0f,
-            "bus" to 4.0f,
-            "truck" to 4.0f,
-            "bicycle" to 3.0f,
-            "person" to 2.0f,
-            "dog" to 2.0f,
-            "cat" to 1.8f
-        )
-    }
-    val defaultDangerThresholdMeters = 1.5f
-
-    LaunchedEffect(isFlashlightOn, boundCamera) {
-        boundCamera?.cameraControl?.enableTorch(isFlashlightOn)
-    }
-
-    AndroidView(
-        factory = { ctx ->
-            val previewView = PreviewView(ctx).apply {
-                scaleType = PreviewView.ScaleType.FILL_CENTER
-            }
-
-            val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-            cameraProviderFuture.addListener({
-                val cameraProvider = cameraProviderFuture.get()
-
-                val previewBuilder = Preview.Builder()
-                val previewExtender = Camera2Interop.Extender(previewBuilder)
-                previewExtender.setCaptureRequestOption(
-                    CaptureRequest.CONTROL_AF_MODE,
-                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
-                )
-                val preview = previewBuilder.build().also {
-                    it.setSurfaceProvider(previewView.surfaceProvider)
-                }
-
-                val resolutionSelector = ResolutionSelector.Builder()
-                    .setResolutionStrategy(
-                        ResolutionStrategy(
-                            Size(640, 640),
-                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
-                        )
-                    )
-                    .build()
-
-                val imageAnalysisBuilder = ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                    .setResolutionSelector(resolutionSelector)
-
-                val imageAnalysis = imageAnalysisBuilder.build()
-                imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                    val bitmap = imageProxy.toBitmap()
-                    if (bitmap != null) {
-                        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
-                        
-                        // 1. Run YOLO detection on the raw bitmap
-                        val rawResults = detector.detect(bitmap, rotationDegrees)
-                        
-                        // 2. Rotate the bitmap to upright orientation for DepthEstimator
-                        val rotatedBitmap = rotateBitmap(bitmap, rotationDegrees.toFloat())
-                        
-                        // 3. Run DepthEstimator on the rotated bitmap
-                        val depthMap = depthEstimator.estimateDepth(rotatedBitmap)
-                        
-                        // 4. Update detections with depth-based distance
-                        val updatedResults = rawResults.map { det ->
-                            val cx = (det.x1 + det.x2) / 2f
-                            val cy = (det.y1 + det.y2) / 2f
-                            
-                            val realDist = depthEstimator.getPhysicalDistance(depthMap, cx, cy)
-                            if (realDist > 0f) {
-                                val dangerThreshold = dangerThresholdsMeters[det.labelEn] ?: defaultDangerThresholdMeters
-                                val isDanger = realDist <= dangerThreshold
-                                val proximity = dangerThreshold / maxOf(realDist, 0.1f)
-                                det.copy(isDanger = isDanger, proximity = proximity, distanceMeters = realDist)
-                            } else {
-                                det
-                            }
-                        }
-                        onDetectionsUpdated(updatedResults)
-                    }
-                    imageProxy.close()
-                }
-
-                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-
-                try {
-                    cameraProvider.unbindAll()
-                    val camera = cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        cameraSelector,
-                        preview,
-                        imageAnalysis
-                    )
-                    boundCamera = camera
-                    onCameraBind(camera)
-                } catch (e: Exception) {
-                    android.util.Log.e("CameraXView", "Use case binding failed", e)
-                }
-            }, ContextCompat.getMainExecutor(ctx))
-
-            previewView
-        },
-        modifier = modifier
-    )
-}
-
-fun yuvToBitmap(image: Image): Bitmap? {
-    if (image.format != ImageFormat.YUV_420_888) {
-        return null
-    }
-    
-    val yBuffer = image.planes[0].buffer
-    val uBuffer = image.planes[1].buffer
-    val vBuffer = image.planes[2].buffer
-
-    val ySize = yBuffer.remaining()
-    val uSize = uBuffer.remaining()
-    val vSize = vBuffer.remaining()
-
-    val nv21 = ByteArray(ySize + uSize + vSize)
-
-    // Copy Y channel
-    yBuffer.get(nv21, 0, ySize)
-
-    // Copy VU channel (Interleaved V and U)
-    val pixelStride = image.planes[1].pixelStride
-    val rowStride = image.planes[1].rowStride
-    var offset = ySize
-    
-    val width = image.width
-    val height = image.height
-    
-    for (row in 0 until height / 2) {
-        for (col in 0 until width / 2) {
-            val uIndex = row * rowStride + col * pixelStride
-            val vIndex = row * image.planes[2].rowStride + col * image.planes[2].pixelStride
-            
-            if (uIndex < uBuffer.capacity() && vIndex < vBuffer.capacity()) {
-                nv21[offset++] = vBuffer.get(vIndex)
-                nv21[offset++] = uBuffer.get(uIndex)
-            }
-        }
-    }
-
-    val out = ByteArrayOutputStream()
-    val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
-    yuvImage.compressToJpeg(Rect(0, 0, width, height), 90, out)
-    val imageBytes = out.toByteArray()
-    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-}
-
-fun Context.findActivity(): Activity? {
-    var context = this
-    while (context is ContextWrapper) {
-        if (context is Activity) return context
-        context = context.baseContext
-    }
-    return null
 }
