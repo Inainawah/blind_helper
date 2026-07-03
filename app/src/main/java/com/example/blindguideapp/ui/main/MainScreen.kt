@@ -125,7 +125,7 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
     }
 
     // Initialize YOLO Detector and Hazard Tracker
-    val detector = remember { YoloDetector(context, "yolo26s_float32.tflite") }
+    val detector = remember { YoloDetector(context, "yolo26m.tflite") }
     val tracker = remember { HazardTracker() }
 
     // State parameters
