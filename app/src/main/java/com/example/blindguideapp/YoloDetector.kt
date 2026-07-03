@@ -24,63 +24,64 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
 
     // Class names mapping (same as python CLASS_NAME_TW)
     val classNamesTw = mapOf(
-        0 to "人", 1 to "腳踏車", 2 to "汽車", 3 to "機車", 4 to "飛機",
-        5 to "公車", 6 to "火車", 7 to "卡車", 8 to "船", 9 to "紅綠燈",
+        0 to "人", 1 to "腳踏車", 2 to "汽車", 3 to "機車",
+        5 to "公車", 7 to "卡車", 9 to "紅綠燈",
         10 to "消防栓", 11 to "停止標誌", 12 to "停車收費錶", 13 to "長椅",
-        14 to "鳥", 15 to "貓", 16 to "狗", 17 to "馬", 18 to "羊", 19 to "牛",
-        20 to "大象", 21 to "熊", 22 to "斑馬", 23 to "長頸鹿", 24 to "背包",
-        25 to "雨傘", 26 to "手提包", 27 to "領帶", 28 to "行李箱", 29 to "飛盤",
-        30 to "滑雪板", 31 to "單板滑雪", 32 to "運動彩球", 33 to "風箏",
-        34 to "棒球棍", 35 to "棒球手套", 36 to "滑板", 37 to "衝浪板",
+        15 to "貓", 16 to "狗",
+        24 to "背包", 25 to "雨傘", 26 to "手提包", 28 to "行李箱",
+        32 to "球類", 34 to "棒球棍", 35 to "棒球手套", 36 to "滑板",
         38 to "網球拍", 39 to "瓶子", 40 to "高腳杯", 41 to "杯子",
-        42 to "叉子", 43 to "刀子", 44 to "湯匙", 45 to "碗", 46 to "香蕉",
-        47 to "蘋果", 48 to "三明治", 49 to "橘子", 50 to "花椰菜",
-        51 to "胡蘿蔔", 52 to "熱狗", 53 to "披薩", 54 to "甜甜圈", 55 to "蛋糕",
-        56 to "椅子", 57 to "沙發", 58 to "盆栽", 59 to "床", 60 to "餐桌",
-        61 to "馬桶", 62 to "電視", 63 to "筆記型電腦", 64 to "滑鼠", 65 to "遙控器",
-        66 to "鍵盤", 67 to "手機", 68 to "微波爐", 69 to "烤箱",
-        70 to "烤麵包機", 71 to "水槽", 72 to "冰箱", 73 to "書本",
-        74 to "時鐘", 75 to "花瓶", 76 to "剪刀", 77 to "泰迪熊",
-        78 to "吹風機", 79 to "牙刷", 80 to "桌子"
+        56 to "椅子", 57 to "沙發", 58 to "盆栽", 60 to "餐桌",
+        72 to "冰箱", 75 to "花瓶", 80 to "桌子"
     )
 
     // English labels for configuration lookup
     val classNamesEn = mapOf(
-        0 to "person", 1 to "bicycle", 2 to "car", 3 to "motorcycle", 4 to "airplane",
-        5 to "bus", 6 to "train", 7 to "truck", 8 to "boat", 9 to "traffic light",
+        0 to "person", 1 to "bicycle", 2 to "car", 3 to "motorcycle",
+        5 to "bus", 7 to "truck", 9 to "traffic light",
         10 to "fire hydrant", 11 to "stop sign", 12 to "parking meter", 13 to "bench",
-        14 to "bird", 15 to "cat", 16 to "dog", 17 to "horse", 18 to "sheep", 19 to "cow",
-        20 to "elephant", 21 to "bear", 22 to "zebra", 23 to "giraffe", 24 to "backpack",
-        25 to "umbrella", 26 to "handbag", 27 to "tie", 28 to "suitcase", 29 to "frisbee",
-        30 to "skis", 31 to "snowboard", 32 to "sports ball", 33 to "kite",
-        34 to "baseball bat", 35 to "baseball glove", 36 to "skateboard", 37 to "surfboard",
+        15 to "cat", 16 to "dog",
+        24 to "backpack", 25 to "umbrella", 26 to "handbag", 28 to "suitcase",
+        32 to "sports ball", 34 to "baseball bat", 35 to "baseball glove", 36 to "skateboard",
         38 to "tennis racket", 39 to "bottle", 40 to "wine glass", 41 to "cup",
-        42 to "fork", 43 to "knife", 44 to "spoon", 45 to "bowl", 46 to "banana",
-        47 to "apple", 48 to "sandwich", 49 to "orange", 50 to "broccoli",
-        51 to "carrot", 52 to "hot dog", 53 to "pizza", 54 to "donut", 55 to "cake",
-        56 to "chair", 57 to "couch", 58 to "potted plant", 59 to "bed", 60 to "dining table",
-        61 to "toilet", 62 to "tv", 63 to "laptop", 64 to "mouse", 65 to "remote",
-        66 to "keyboard", 67 to "cell phone", 68 to "microwave", 69 to "oven",
-        70 to "toaster", 71 to "sink", 72 to "refrigerator", 73 to "book",
-        74 to "clock", 75 to "vase", 76 to "scissors", 77 to "teddy bear",
-        78 to "hair drier", 79 to "toothbrush", 80 to "table"
+        56 to "chair", 57 to "couch", 58 to "potted plant", 60 to "dining table",
+        72 to "refrigerator", 75 to "vase", 80 to "table"
     )
 
     // Area thresholds for 2-meter warnings (box area on 640x640 resolution)
     val areaThresholds2M = mapOf(
-        "person" to 69000f, "umbrella" to 47000f, "chair" to 36000f, "table" to 9000f,
-        "bottle" to 1300f, "backpack" to 12000f, "couch" to 267000f, "suitcase" to 60500f,
-        // === 新加入的戶外致命與動態障礙物 ===
-        "motorcycle" to 95000f,
+        "person" to 69000f,
         "bicycle" to 45000f,
         "car" to 310000f,
+        "motorcycle" to 95000f,
         "bus" to 450000f,
         "truck" to 420000f,
+        "traffic light" to 12000f,
         "fire hydrant" to 8500f,
         "stop sign" to 15000f,
-        "potted plant" to 18000f,
+        "parking meter" to 10000f,
+        "bench" to 50000f,
+        "cat" to 8000f,
         "dog" to 22000f,
-        "cat" to 8000f
+        "backpack" to 12000f,
+        "umbrella" to 47000f,
+        "handbag" to 15000f,
+        "suitcase" to 60500f,
+        "sports ball" to 2500f,
+        "baseball bat" to 3000f,
+        "baseball glove" to 5000f,
+        "skateboard" to 8000f,
+        "tennis racket" to 6000f,
+        "bottle" to 1300f,
+        "wine glass" to 1500f,
+        "cup" to 1800f,
+        "chair" to 36000f,
+        "couch" to 267000f,
+        "potted plant" to 18000f,
+        "dining table" to 90000f,
+        "refrigerator" to 150000f,
+        "vase" to 4500f,
+        "table" to 9000f
     )
 
 
