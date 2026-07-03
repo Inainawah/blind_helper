@@ -428,6 +428,17 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
+                    HoldToTalkButton(
+    isListening = isListening,
+    onPressStart = {
+        isListening = true
+    },
+    onPressEnd = {
+        isListening = false
+    }
+)
+
+Spacer(modifier = Modifier.height(16.dp))
                     // Status Pill
                     Row(
                         modifier = Modifier
