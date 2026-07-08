@@ -8,6 +8,11 @@ import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.hardware.camera2.CaptureRequest
 import android.speech.tts.TextToSpeech
+import android.content.Intent
+import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -136,6 +141,80 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
     var lastSpokenClassId by remember { mutableStateOf(-1) }
     var lastSpokenPriority by remember { mutableStateOf(0f) }
     var isListening by remember { mutableStateOf(false) }
+    var recognizedText by remember { mutableStateOf("尚未收到語音指令") }
+
+val speechRecognizer = remember {
+    SpeechRecognizer.createSpeechRecognizer(context)
+}
+
+val speechIntent = remember {
+    Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        putExtra(
+            RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+            RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+        )
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-TW")
+        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+    }
+}
+DisposableEffect(Unit) {
+
+    speechRecognizer.setRecognitionListener(
+        object : RecognitionListener {
+
+            override fun onReadyForSpeech(params: Bundle?) {
+                recognizedText = "正在聆聽..."
+            }
+
+            override fun onBeginningOfSpeech() {}
+
+            override fun onRmsChanged(rmsdB: Float) {}
+
+            override fun onBufferReceived(buffer: ByteArray?) {}
+
+            override fun onEndOfSpeech() {
+                isListening = false
+            }
+
+            override fun onError(error: Int) {
+                isListening = false
+                recognizedText = "沒有辨識到語音"
+            }
+
+            override fun onResults(results: Bundle?) {
+
+                val text =
+                    results
+                        ?.getStringArrayList(
+                            SpeechRecognizer.RESULTS_RECOGNITION
+                        )
+                        ?.firstOrNull()
+
+                recognizedText = text ?: "沒有內容"
+            }
+
+            override fun onPartialResults(partialResults: Bundle?) {
+
+                val text =
+                    partialResults
+                        ?.getStringArrayList(
+                            SpeechRecognizer.RESULTS_RECOGNITION
+                        )
+                        ?.firstOrNull()
+
+                if (!text.isNullOrBlank()) {
+                    recognizedText = text
+                }
+            }
+
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        }
+    )
+
+    onDispose {
+        speechRecognizer.destroy()
+    }
+}
     // Pulse animation for status indicator
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val alphaAnim by infiniteTransition.animateFloat(
@@ -432,12 +511,20 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
     isListening = isListening,
     onPressStart = {
         isListening = true
+        recognizedText = "正在聆聽..."
+        speechRecognizer.startListening(speechIntent)
     },
     onPressEnd = {
         isListening = false
+        speechRecognizer.stopListening()
     }
 )
-
+Text(
+    text = "語音內容：$recognizedText",
+    color = Color.White,
+    fontSize = 14.sp,
+    fontWeight = FontWeight.Bold
+)
 Spacer(modifier = Modifier.height(16.dp))
                     // Status Pill
                     Row(
@@ -780,11 +867,20 @@ Spacer(modifier = Modifier.height(16.dp))
         isListening = isListening,
         onPressStart = {
             isListening = true
+            recognizedText = "正在聆聽..."
+        speechRecognizer.startListening(speechIntent)
         },
         onPressEnd = {
             isListening = false
+            speechRecognizer.stopListening()
         }
     )
+    Text(
+    text = "語音內容：$recognizedText",
+    color = Color.White,
+    fontSize = 16.sp,
+    fontWeight = FontWeight.Bold
+)
                     // Danger indicator if any danger items detected
                     val dangerousItems = detections.filter { it.isDanger }
                     val closestDangerItem = dangerousItems.maxByOrNull { it.proximity }
