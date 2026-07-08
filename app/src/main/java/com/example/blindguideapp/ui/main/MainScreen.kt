@@ -259,11 +259,7 @@ DisposableEffect(Unit) {
 
         if (currentTime >= lockedUntil || shouldPreempt) {
             val name = det.labelTw
-            val alertMsg = if (isUrgent) {
-                "緊急！前方有 $name 快速靠近"
-            } else {
-                "注意，前方有 $name"
-            }
+            val alertMsg = "前方有 $name"
 
             // Shorten cooldown for urgent preemptive alerts to remain highly responsive
             val estimatedSpeechDurationMs = alertMsg.length * 350L + 500L
@@ -612,7 +608,7 @@ Spacer(modifier = Modifier.height(16.dp))
                                     fontSize = 14.sp
                                 )
                                 Text(
-                                    text = closestDangerItem.labelTw,
+                                    text = "${closestDangerItem.labelTw} (${String.format("%.1f", closestDangerItem.distanceMeters)}公尺)",
                                     color = Color(0xFFB71C1C),
                                     fontSize = 12.sp
                                 )
@@ -906,7 +902,7 @@ Spacer(modifier = Modifier.height(16.dp))
                                     fontSize = 15.sp
                                 )
                                 Text(
-                                    text = "偵測到最接近: " + closestDangerItem.labelTw,
+                                    text = "偵測到最接近: ${closestDangerItem.labelTw} (${String.format("%.1f", closestDangerItem.distanceMeters)}公尺)",
                                     color = Color(0xFFB71C1C),
                                     fontSize = 13.sp
                                 )
