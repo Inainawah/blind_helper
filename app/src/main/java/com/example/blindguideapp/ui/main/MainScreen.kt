@@ -25,6 +25,17 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import android.location.Location
+import android.location.LocationManager
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType.Companion.toMediaType
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -148,6 +159,11 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
     var lastSpokenPriority by remember { mutableStateOf(0f) }
     var isListening by remember { mutableStateOf(false) }
     var recognizedText by remember { mutableStateOf("尚未收到語音指令") }
+    var serverUrl by remember { mutableStateOf("http://10.0.2.2:3000") }
+    var navigationResult by remember { mutableStateOf<DirectionsResponse?>(null) }
+    var showNavigationTab by remember { mutableStateOf(false) }
+    var showSettingsDialog by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
 
 val speechRecognizer = remember {
     SpeechRecognizer.createSpeechRecognizer(context)
@@ -188,15 +204,19 @@ DisposableEffect(Unit) {
             }
 
             override fun onResults(results: Bundle?) {
-
-                val text =
-                    results
-                        ?.getStringArrayList(
-                            SpeechRecognizer.RESULTS_RECOGNITION
-                        )
-                        ?.firstOrNull()
-
+                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
                 recognizedText = text ?: "沒有內容"
+                if (!text.isNullOrBlank()) {
+                    val (lat, lng) = getCurrentLocation(context)
+                    coroutineScope.launch {
+                        handleVoiceCommand(context, text, serverUrl, lat, lng, tts) { result ->
+                            navigationResult = result
+                            if (result != null || text.contains("哪裡") || text.contains("在哪")) {
+                                showNavigationTab = true
+                            }
+                        }
+                    }
+                }
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
@@ -265,7 +285,7 @@ DisposableEffect(Unit) {
 
         if (currentTime >= lockedUntil || shouldPreempt) {
             val name = det.labelTw
-            val alertMsg = "前方有 $name"
+            val alertMsg = "${det.direction}有 $name"
 
             // Shorten cooldown for urgent preemptive alerts to remain highly responsive
             val estimatedSpeechDurationMs = alertMsg.length * 350L + 500L
@@ -284,9 +304,9 @@ DisposableEffect(Unit) {
                 alertLogs.removeAt(alertLogs.size - 1)
             }
             val logMessage = if (isUrgent) {
-                "🔴 緊急警告: $name 快速靠近 (優先度: ${String.format("%.1f", priority)})"
+                "🔴 緊急警告: ${det.direction}有 $name 快速靠近 (優先度: ${String.format("%.1f", priority)})"
             } else {
-                "⚠️ 危險警告: 前方有 $name (優先度: ${String.format("%.1f", priority)})"
+                "⚠️ 危險警告: ${det.direction}有 $name (優先度: ${String.format("%.1f", priority)})"
             }
             alertLogs.add(0, AlertLog(System.currentTimeMillis(), logMessage, timeStamp))
         }
@@ -303,6 +323,39 @@ DisposableEffect(Unit) {
             .fillMaxSize()
             .background(Color.Black)
     ) {
+        if (showSettingsDialog) {
+            var tempUrl by remember { mutableStateOf(serverUrl) }
+            AlertDialog(
+                onDismissRequest = { showSettingsDialog = false },
+                title = { Text("設定伺服器網址") },
+                text = {
+                    Column {
+                        Text("請輸入後端 API 伺服器網址：", fontSize = 14.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        TextField(
+                            value = tempUrl,
+                            onValueChange = { tempUrl = it },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        serverUrl = tempUrl
+                        showSettingsDialog = false
+                    }) {
+                        Text("確定")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showSettingsDialog = false }) {
+                        Text("取消")
+                    }
+                }
+            )
+        }
+
         if (isLandscape) {
             // Landscape Layout: Camera square centered with black masks on left and right sides
             Row(
@@ -310,7 +363,7 @@ DisposableEffect(Unit) {
                     .fillMaxSize()
                     .safeDrawingPadding()
             ) {
-                // Left Panel: History alert logs
+                // Left Panel: History alert logs & Navigation
                 Column(
                     modifier = Modifier
                         .weight(1f)
@@ -318,52 +371,200 @@ DisposableEffect(Unit) {
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text(
-                        text = "歷史警告日誌",
-                        color = Color.White.copy(alpha = 0.8f),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Button(
+                            onClick = { showNavigationTab = false },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (!showNavigationTab) Color(0xFFFFD54F) else Color(0x22FFFFFF),
+                                contentColor = if (!showNavigationTab) Color.Black else Color.White
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f).height(36.dp),
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Text("警告日誌", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Button(
+                            onClick = { showNavigationTab = true },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (showNavigationTab) Color(0xFF4DD0E1) else Color(0x22FFFFFF),
+                                contentColor = if (showNavigationTab) Color.Black else Color.White
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f).height(36.dp),
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Text("導航指引", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        IconButton(
+                            onClick = { showSettingsDialog = true },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Text("⚙️", fontSize = 16.sp)
+                        }
+                    }
 
                     HorizontalDivider(color = Color(0x1AFFFFFF), thickness = 1.dp)
 
-                    if (alertLogs.isEmpty()) {
-                        Box(
-                            modifier = Modifier.fillMaxSize(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "尚無危險警告記錄，環境安全",
-                                color = Color.White.copy(alpha = 0.4f),
-                                fontSize = 13.sp
-                            )
+                    if (!showNavigationTab) {
+                        if (alertLogs.isEmpty()) {
+                            Box(
+                                modifier = Modifier.fillMaxSize(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "尚無危險警告記錄，環境安全",
+                                    color = Color.White.copy(alpha = 0.4f),
+                                    fontSize = 13.sp
+                               )
+                            }
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize(),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                contentPadding = PaddingValues(vertical = 4.dp)
+                            ) {
+                                items(alertLogs, key = { log -> log.id }) { log ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = log.message,
+                                            color = Color(0xFFFF8A80),
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = log.timestamp,
+                                            color = Color.White.copy(alpha = 0.4f),
+                                            fontSize = 11.sp
+                                        )
+                                    }
+                                }
+                            }
                         }
                     } else {
-                        LazyColumn(
-                            modifier = Modifier.fillMaxSize(),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                            contentPadding = PaddingValues(vertical = 4.dp)
-                        ) {
-                            items(alertLogs, key = { it.id }) { log ->
+                        val result = navigationResult
+                        if (result == null) {
+                            Box(
+                                modifier = Modifier.fillMaxSize(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "按住語音按鈕說話，詢問「我現在在哪裡」或說出目的地（例如「捷運淡水站」）以開始導航。",
+                                    color = Color.White.copy(alpha = 0.5f),
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.padding(16.dp),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
+                            }
+                        } else {
+                            Column(
+                                modifier = Modifier.fillMaxSize(),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "起點: ${result.start_address?.substringAfter("台灣") ?: ""}",
+                                        color = Color.LightGray,
+                                        fontSize = 11.sp,
+                                        maxLines = 1
+                                    )
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "終點: ${result.end_address?.substringAfter("台灣") ?: ""}",
+                                        color = Color.LightGray,
+                                        fontSize = 11.sp,
+                                        maxLines = 1
+                                    )
+                                }
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = log.message,
-                                        color = Color(0xFFFF8A80),
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        modifier = Modifier.weight(1f)
+                                        text = "全程: ${result.distance ?: ""} / ${result.duration ?: ""}",
+                                        color = Color(0xFF4DD0E1),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold
                                     )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = log.timestamp,
-                                        color = Color.White.copy(alpha = 0.4f),
-                                        fontSize = 11.sp
-                                    )
+                                    Button(
+                                        onClick = {
+                                            navigationResult = null
+                                            showNavigationTab = false
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE57373)),
+                                        shape = RoundedCornerShape(6.dp),
+                                        modifier = Modifier.height(28.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                    ) {
+                                        Text("結束導航", fontSize = 10.sp, color = Color.White)
+                                    }
+                                }
+
+                                HorizontalDivider(color = Color(0x11FFFFFF), thickness = 1.dp)
+
+                                LazyColumn(
+                                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                    contentPadding = PaddingValues(vertical = 4.dp)
+                                ) {
+                                    val steps = result.steps ?: emptyList()
+                                    items(steps) { step ->
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(Color(0x11FFFFFF))
+                                                .padding(8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(18.dp)
+                                                    .clip(CircleShape)
+                                                    .background(Color(0xFF4DD0E1)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text(
+                                                    text = step.step_order.toString(),
+                                                    color = Color.Black,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = step.instruction,
+                                                    color = Color.White,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Medium
+                                                )
+                                                Text(
+                                                    text = "${step.distance} (${step.duration})",
+                                                    color = Color.Gray,
+                                                    fontSize = 10.sp
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -920,58 +1121,188 @@ Spacer(modifier = Modifier.height(16.dp))
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(160.dp)
+                            .height(180.dp)
                             .clip(RoundedCornerShape(18.dp))
                             .background(Color(0xBC1E1E1E))
                             .border(1.dp, Color(0x22FFFFFF), RoundedCornerShape(18.dp))
-                            .padding(14.dp)
+                            .padding(12.dp)
                     ) {
-                        Text(
-                            text = "歷史警告日誌",
-                            color = Color.White.copy(alpha = 0.8f),
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(bottom = 8.dp)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(
+                                onClick = { showNavigationTab = false },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (!showNavigationTab) Color(0xFFFFD54F) else Color(0x22FFFFFF),
+                                    contentColor = if (!showNavigationTab) Color.Black else Color.White
+                                ),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.weight(1f).height(32.dp),
+                                contentPadding = PaddingValues(0.dp)
+                            ) {
+                                Text("警告日誌", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Button(
+                                onClick = { showNavigationTab = true },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (showNavigationTab) Color(0xFF4DD0E1) else Color(0x22FFFFFF),
+                                    contentColor = if (showNavigationTab) Color.Black else Color.White
+                                ),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.weight(1f).height(32.dp),
+                                contentPadding = PaddingValues(0.dp)
+                            ) {
+                                Text("導航指引", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                            IconButton(
+                                onClick = { showSettingsDialog = true },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Text("⚙️", fontSize = 14.sp)
+                            }
+                        }
+
+                        HorizontalDivider(
+                            color = Color(0x1AFFFFFF),
+                            thickness = 1.dp,
+                            modifier = Modifier.padding(vertical = 6.dp)
                         )
 
-                        HorizontalDivider(color = Color(0x1AFFFFFF), thickness = 1.dp)
-
-                        if (alertLogs.isEmpty()) {
-                            Box(
-                                modifier = Modifier.fillMaxSize(),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "尚無危險警告記錄，環境安全",
-                                    color = Color.White.copy(alpha = 0.4f),
-                                    fontSize = 13.sp
-                                )
+                        if (!showNavigationTab) {
+                            if (alertLogs.isEmpty()) {
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "尚無危險警告記錄，環境安全",
+                                        color = Color.White.copy(alpha = 0.4f),
+                                        fontSize = 13.sp
+                                    )
+                                }
+                            } else {
+                                LazyColumn(
+                                    modifier = Modifier.fillMaxSize(),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                    contentPadding = PaddingValues(vertical = 4.dp)
+                                ) {
+                                    items(alertLogs, key = { it.id }) { log ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = log.message,
+                                                color = Color(0xFFFF8A80),
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = log.timestamp,
+                                                color = Color.White.copy(alpha = 0.4f),
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         } else {
-                            LazyColumn(
-                                modifier = Modifier.fillMaxSize(),
-                                verticalArrangement = Arrangement.spacedBy(6.dp),
-                                contentPadding = PaddingValues(vertical = 4.dp)
-                            ) {
-                                items(alertLogs, key = { it.id }) { log ->
+                            val result = navigationResult
+                            if (result == null) {
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "按住語音按鈕說話，詢問「我現在在哪裡」或說出目的地以開始導航。",
+                                        color = Color.White.copy(alpha = 0.5f),
+                                        fontSize = 11.sp,
+                                        modifier = Modifier.padding(8.dp),
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                    )
+                                }
+                            } else {
+                                Column(
+                                    modifier = Modifier.fillMaxSize(),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Text(
-                                            text = log.message,
-                                            color = Color(0xFFFF8A80),
+                                            text = "全程: ${result.distance ?: ""} / ${result.duration ?: ""}",
+                                            color = Color(0xFF4DD0E1),
                                             fontSize = 12.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            modifier = Modifier.weight(1f)
+                                            fontWeight = FontWeight.Bold
                                         )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text(
-                                            text = log.timestamp,
-                                            color = Color.White.copy(alpha = 0.4f),
-                                            fontSize = 11.sp
-                                        )
+                                        Button(
+                                            onClick = {
+                                                navigationResult = null
+                                                showNavigationTab = false
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE57373)),
+                                            shape = RoundedCornerShape(6.dp),
+                                            modifier = Modifier.height(24.dp),
+                                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Text("結束", fontSize = 9.sp, color = Color.White)
+                                        }
+                                    }
+
+                                    HorizontalDivider(color = Color(0x11FFFFFF), thickness = 1.dp)
+
+                                    LazyColumn(
+                                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                                        contentPadding = PaddingValues(vertical = 2.dp)
+                                    ) {
+                                        val steps = result.steps ?: emptyList()
+                                        items(steps) { step ->
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(6.dp))
+                                                    .background(Color(0x11FFFFFF))
+                                                    .padding(6.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(16.dp)
+                                                        .clip(CircleShape)
+                                                        .background(Color(0xFF4DD0E1)),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Text(
+                                                        text = step.step_order.toString(),
+                                                        color = Color.Black,
+                                                        fontSize = 9.sp,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = step.instruction,
+                                                        color = Color.White,
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Medium
+                                                    )
+                                                    Text(
+                                                        text = "${step.distance} (${step.duration})",
+                                                        color = Color.Gray,
+                                                        fontSize = 9.sp
+                                                    )
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1078,4 +1409,148 @@ fun rotateBitmap(bitmap: Bitmap, degrees: Float): Bitmap {
     if (degrees == 0f) return bitmap
     val matrix = Matrix().apply { postRotate(degrees) }
     return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+}
+
+@Serializable
+data class ReverseGeocodeRequest(val latitude: Double, val longitude: Double)
+
+@Serializable
+data class ReverseGeocodeResponse(
+    val success: Boolean,
+    val address: String? = null,
+    val message: String? = null
+)
+
+@Serializable
+data class DirectionsRequest(
+    val current_latitude: Double,
+    val current_longitude: Double,
+    val destination: String
+)
+
+@Serializable
+data class DirectionStep(
+    val step_order: Int,
+    val instruction: String,
+    val distance: String,
+    val duration: String
+)
+
+@Serializable
+data class DirectionsResponse(
+    val success: Boolean,
+    val start_address: String? = null,
+    val end_address: String? = null,
+    val distance: String? = null,
+    val duration: String? = null,
+    val steps: List<DirectionStep>? = null,
+    val message: String? = null
+)
+
+private val json = Json { ignoreUnknownKeys = true }
+private val client = OkHttpClient()
+
+fun getCurrentLocation(context: Context): Pair<Double, Double> {
+    val defaultLoc = Pair(25.175617, 121.450589)
+    if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+        return defaultLoc
+    }
+    val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return defaultLoc
+    try {
+        val providers = locationManager.getProviders(true)
+        var bestLocation: Location? = null
+        for (provider in providers) {
+            val l = locationManager.getLastKnownLocation(provider) ?: continue
+            if (bestLocation == null || l.accuracy < bestLocation.accuracy) {
+                bestLocation = l
+            }
+        }
+        if (bestLocation != null) {
+            return Pair(bestLocation.latitude, bestLocation.longitude)
+        }
+    } catch (e: SecurityException) {
+        e.printStackTrace()
+    }
+    return defaultLoc
+}
+
+suspend fun requestReverseGeocode(serverUrl: String, lat: Double, lng: Double): String = withContext(Dispatchers.IO) {
+    val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+    val reqData = ReverseGeocodeRequest(lat, lng)
+    val requestBody = json.encodeToString(ReverseGeocodeRequest.serializer(), reqData).toRequestBody(jsonMediaType)
+    val request = Request.Builder()
+        .url("$serverUrl/api/locations/reverse-geocode")
+        .post(requestBody)
+        .build()
+    try {
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return@withContext "伺服器錯誤: ${response.code}"
+            val bodyString = response.body?.string() ?: return@withContext "回應為空"
+            val res = json.decodeFromString(ReverseGeocodeResponse.serializer(), bodyString)
+            if (res.success) {
+                res.address ?: "未取得地址"
+            } else {
+                res.message ?: "反地理編碼失敗"
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        "連線失敗: ${e.localizedMessage}"
+    }
+}
+
+suspend fun requestDirections(serverUrl: String, lat: Double, lng: Double, destination: String): DirectionsResponse = withContext(Dispatchers.IO) {
+    val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+    val reqData = DirectionsRequest(lat, lng, destination)
+    val requestBody = json.encodeToString(DirectionsRequest.serializer(), reqData).toRequestBody(jsonMediaType)
+    val request = Request.Builder()
+        .url("$serverUrl/api/navigation/directions")
+        .post(requestBody)
+        .build()
+    try {
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return@withContext DirectionsResponse(false, message = "伺服器錯誤: ${response.code}")
+            val bodyString = response.body?.string() ?: return@withContext DirectionsResponse(false, message = "回應為空")
+            json.decodeFromString(DirectionsResponse.serializer(), bodyString)
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        DirectionsResponse(false, message = "連線失敗: ${e.localizedMessage}")
+    }
+}
+
+suspend fun handleVoiceCommand(
+    context: Context,
+    text: String,
+    serverUrl: String,
+    lat: Double,
+    lng: Double,
+    tts: TextToSpeech?,
+    onDirectionsResult: (DirectionsResponse?) -> Unit
+) {
+    if (text.contains("哪裡") || text.contains("在哪")) {
+        tts?.speak("正在查詢您目前的位置...", TextToSpeech.QUEUE_FLUSH, null, "reverse_geocode_start")
+        val address = requestReverseGeocode(serverUrl, lat, lng)
+        tts?.speak("您目前的位置是：$address", TextToSpeech.QUEUE_FLUSH, null, "reverse_geocode_result")
+        onDirectionsResult(null)
+    } else {
+        tts?.speak("正在規劃前往 $text 的路線...", TextToSpeech.QUEUE_FLUSH, null, "directions_start")
+        val response = requestDirections(serverUrl, lat, lng, text)
+        if (response.success) {
+            val distanceStr = response.distance ?: ""
+            val durationStr = response.duration ?: ""
+            val summary = "規劃成功。全程約 ${distanceStr}，需要 ${durationStr}。指引已顯示在螢幕上。"
+            tts?.speak(summary, TextToSpeech.QUEUE_FLUSH, null, "directions_success")
+            
+            val firstStep = response.steps?.firstOrNull()
+            if (firstStep != null) {
+                tts?.speak("第一步，${firstStep.instruction}，距離約 ${firstStep.distance}", TextToSpeech.QUEUE_ADD, null, "directions_first_step")
+            }
+            onDirectionsResult(response)
+        } else {
+            val errorMsg = "導航規劃失敗，原因為 ${response.message ?: "未知錯誤"}"
+            tts?.speak(errorMsg, TextToSpeech.QUEUE_FLUSH, null, "directions_fail")
+            onDirectionsResult(response)
+        }
+    }
 }
