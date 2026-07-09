@@ -73,32 +73,38 @@ fun MainScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
+
+    val permissions = arrayOf(
+        Manifest.permission.CAMERA,
+        Manifest.permission.RECORD_AUDIO
+    )
 
     // States
-    var hasCameraPermission by remember {
+    var hasPermissions by remember {
         mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+            permissions.all {
+                ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+            }
         )
     }
 
     val launcher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission(),
-        onResult = { granted ->
-            hasCameraPermission = granted
+        contract = ActivityResultContracts.RequestMultiplePermissions(),
+        onResult = { grantedMap ->
+            hasPermissions = grantedMap.values.all { it }
         }
     )
 
     LaunchedEffect(key1 = true) {
-        if (!hasCameraPermission) {
-            launcher.launch(Manifest.permission.CAMERA)
+        if (!hasPermissions) {
+            launcher.launch(permissions)
         }
     }
 
-    if (hasCameraPermission) {
+    if (hasPermissions) {
         CameraDetectionLayout(modifier)
     } else {
-        PermissionDeniedScreen(onRequestPermission = { launcher.launch(Manifest.permission.CAMERA) })
+        PermissionDeniedScreen(onRequestPermission = { launcher.launch(permissions) })
     }
 }
 
@@ -178,7 +184,7 @@ DisposableEffect(Unit) {
 
             override fun onError(error: Int) {
                 isListening = false
-                recognizedText = "沒有辨識到語音"
+                recognizedText = "辨識失敗 (錯誤碼: $error)"
             }
 
             override fun onResults(results: Bundle?) {
@@ -1041,14 +1047,14 @@ fun PermissionDeniedScreen(onRequestPermission: () -> Unit) {
             )
             Spacer(modifier = Modifier.height(18.dp))
             Text(
-                text = "需要相機存取權限",
+                text = "需要相機與麥克風權限",
                 color = Color.White,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "導盲警報系統需要使用您手機的內建鏡頭來辨識前方的物體，請允許此應用程式的相機權限。",
+                text = "導盲警報系統需要使用您手機的鏡頭來辨識前方物體，並需要麥克風來進行語音目的地輸入。請允許此應用程式的相關權限。",
                 color = Color.LightGray,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Normal,
@@ -1059,7 +1065,7 @@ fun PermissionDeniedScreen(onRequestPermission: () -> Unit) {
                 onClick = onRequestPermission,
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF66BB6A))
             ) {
-                Text(text = "授權相機權限", color = Color.White, fontWeight = FontWeight.Bold)
+                Text(text = "授予必要權限", color = Color.White, fontWeight = FontWeight.Bold)
             }
         }
     }
