@@ -10,9 +10,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ==================== 1. 儲存位置 ====================
 app.post("/api/locations", async (req, res) => {
     try {
-        const { user_id, latitude, longitude, accuracy, address } = req.body;
+        const { user_id, latitude, longitude, accuracy } = req.body;
 
         if (!user_id || latitude == null || longitude == null) {
             return res.status(400).json({
@@ -21,25 +22,48 @@ app.post("/api/locations", async (req, res) => {
             });
         }
 
+        const geoResponse = await axios.get(
+            "https://maps.googleapis.com/maps/api/geocode/json",
+            {
+                params: {
+                    latlng: `${latitude},${longitude}`,
+                    language: "zh-TW",
+                    key: process.env.GOOGLE_MAPS_API_KEY
+                }
+            }
+        );
+
+        if (geoResponse.data.status !== "OK") {
+            return res.status(400).json({
+                success: false,
+                message: geoResponse.data.status,
+                error_message: geoResponse.data.error_message
+            });
+        }
+
+        const address = geoResponse.data.results[0].formatted_address;
+
         const sql = `
-      INSERT INTO locations
-      (user_id, latitude, longitude, accuracy, address)
-      VALUES (?, ?, ?, ?, ?)
-    `;
+            INSERT INTO locations
+            (user_id, latitude, longitude, accuracy, address)
+            VALUES (?, ?, ?, ?, ?)
+        `;
 
         const [result] = await db.execute(sql, [
             user_id,
             latitude,
             longitude,
             accuracy || null,
-            address || null
+            address
         ]);
 
         res.status(201).json({
             success: true,
             message: "Location created successfully",
-            location_id: result.insertId
+            location_id: result.insertId,
+            address: address
         });
+
     } catch (error) {
         if (error.code === "ER_NO_REFERENCED_ROW_2") {
             return res.status(404).json({
@@ -47,15 +71,12 @@ app.post("/api/locations", async (req, res) => {
                 message: "User not found"
             });
         }
-
         console.error(error);
-
-        res.status(500).json({
-            success: false,
-            message: "Internal server error"
-        });
+        res.status(500).json({ success: false, message: "Internal server error" });
     }
 });
+
+// ==================== 2. 反向地理解析 ====================
 app.post("/api/locations/reverse-geocode", async (req, res) => {
     try {
         const { latitude, longitude } = req.body;
@@ -84,45 +105,38 @@ app.post("/api/locations/reverse-geocode", async (req, res) => {
                 message: response.data.status,
                 error_message: response.data.error_message
             });
-
         }
 
         const address = response.data.results[0].formatted_address;
 
-        res.status(200).json({
-            success: true,
-            address: address
-        });
+        res.status(200).json({ success: true, address: address });
 
     } catch (error) {
         console.error(error);
-
-        res.status(500).json({
-            success: false,
-            message: "Internal server error"
-        });
+        res.status(500).json({ success: false, message: "Internal server error" });
     }
 });
+
+// ==================== 3. 完美相容：二合一導航 API ====================
+// 不管 start 是傳文字地址還是 "緯度,經度" 字串，通通走這條！
 app.post("/api/navigation/directions", async (req, res) => {
     try {
-        const {
-            current_latitude,
-            current_longitude,
-            destination
-        } = req.body;
+        const { start, destination } = req.body;
 
-        if (current_latitude == null || current_longitude == null || !destination) {
+        // 驗證欄位是否存在
+        if (!start || !destination) {
             return res.status(400).json({
                 success: false,
-                message: "current_latitude, current_longitude, and destination are required"
+                message: "start and destination are required"
             });
         }
 
+        // 直接發送給 Google Maps API，Google 會自動辨識 start 是文字還是經緯度
         const response = await axios.get(
             "https://maps.googleapis.com/maps/api/directions/json",
             {
                 params: {
-                    origin: `${current_latitude},${current_longitude}`,
+                    origin: start,
                     destination: destination,
                     mode: "walking",
                     language: "zh-TW",
@@ -162,15 +176,10 @@ app.post("/api/navigation/directions", async (req, res) => {
 
     } catch (error) {
         console.error(error);
-
-        res.status(500).json({
-            success: false,
-            message: "Internal server error"
-        });
+        res.status(500).json({ success: false, message: "Internal server error" });
     }
 });
 
 app.listen(process.env.PORT || 3000, () => {
     console.log(`Server running on port ${process.env.PORT || 3000}`);
 });
-
