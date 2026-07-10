@@ -96,6 +96,8 @@ dependencies {
   implementation("org.tensorflow:tensorflow-lite-gpu:2.16.1")
   implementation("org.tensorflow:tensorflow-lite:2.14.0")
   implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+
+  // Networking and JSON
+  implementation("com.squareup.okhttp3:okhttp:4.12.0")
+  implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 }
-
-

@@ -115,7 +115,8 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
         val labelEn: String,
         val isDanger: Boolean,
         val proximity: Float,
-        val distanceMeters: Float = 0f
+        val distanceMeters: Float = 0f,
+        val direction: String = "正前方"
     )
 
     init {
@@ -237,6 +238,13 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
             // Estimate default distance from area ratio: at proximity=1.0, distance is 2.0 meters
             val distanceMeters = 2.0f / (proximity.coerceAtLeast(0.01f))
 
+            val centerX = (rx1 + rx2) / 2f
+            val direction = when {
+                centerX < 0.33f -> "左前方"
+                centerX > 0.67f -> "右前方"
+                else -> "正前方"
+            }
+
             detections.add(
                 Detection(
                     x1 = rx1.coerceIn(0f, 1f),
@@ -249,7 +257,8 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
                     labelEn = labelEn,
                     isDanger = isDanger,
                     proximity = proximity,
-                    distanceMeters = distanceMeters
+                    distanceMeters = distanceMeters,
+                    direction = direction
                 )
             )
         }
