@@ -28,8 +28,6 @@ import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -511,14 +509,15 @@ DisposableEffect(Unit) {
                 ) {
                     HoldToTalkButton(
     isListening = isListening,
-    onPressStart = {
-        isListening = true
-        recognizedText = "正在聆聽..."
-        speechRecognizer.startListening(speechIntent)
-    },
-    onPressEnd = {
-        isListening = false
-        speechRecognizer.stopListening()
+    onToggle = {
+        if (isListening) {
+            speechRecognizer.stopListening()
+            isListening = false
+        } else {
+            recognizedText = "正在聆聽..."
+            speechRecognizer.startListening(speechIntent)
+            isListening = true
+        }
     }
 )
 Text(
@@ -866,17 +865,18 @@ Spacer(modifier = Modifier.height(16.dp))
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     HoldToTalkButton(
-        isListening = isListening,
-        onPressStart = {
-            isListening = true
-            recognizedText = "正在聆聽..."
-        speechRecognizer.startListening(speechIntent)
-        },
-        onPressEnd = {
-            isListening = false
+    isListening = isListening,
+    onToggle = {
+        if (isListening) {
             speechRecognizer.stopListening()
+            isListening = false
+        } else {
+            recognizedText = "正在聆聽..."
+            speechRecognizer.startListening(speechIntent)
+            isListening = true
         }
-    )
+    }
+)
     Text(
     text = "語音內容：$recognizedText",
     color = Color.White,
@@ -985,8 +985,7 @@ Spacer(modifier = Modifier.height(16.dp))
 @Composable
 fun HoldToTalkButton(
     isListening: Boolean,
-    onPressStart: () -> Unit,
-    onPressEnd: () -> Unit
+    onToggle: () -> Unit
 ) {
     Box(
         modifier = Modifier
@@ -1002,27 +1001,21 @@ fun HoldToTalkButton(
                 color = if (isListening) Color(0xFF4DD0E1) else Color(0xFFFFD54F),
                 shape = RoundedCornerShape(18.dp)
             )
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = {
-                        onPressStart()
-                        tryAwaitRelease()
-                        onPressEnd()
-                    }
-                )
+            .clickable {
+                onToggle()
             }
             .semantics {
                 contentDescription =
                     if (isListening)
-                        "正在聆聽，放開後停止語音輸入"
+                        "正在聆聽，點兩下停止語音輸入"
                     else
-                        "按住說話，說出目的地"
+                        "點兩下開始語音輸入"
                 role = Role.Button
             },
         contentAlignment = Alignment.Center
     ) {
         Text(
-            text = if (isListening) "🎙 正在聆聽..." else "🎙 按住說話",
+            text = if (isListening) "⏹ 停止聆聽" else "🎙 開始說話",
             color = if (isListening) Color.Black else Color.White,
             fontSize = 20.sp,
             fontWeight = FontWeight.Bold
