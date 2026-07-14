@@ -723,8 +723,8 @@ DisposableEffect(Unit) {
 )
 Text(
     text = "語音內容：$recognizedText",
-    color = Color.White,
-    fontSize = 14.sp,
+    color = Color(0xFFFFD54F),
+    fontSize = 18.sp,
     fontWeight = FontWeight.Bold
 )
 Spacer(modifier = Modifier.height(16.dp))
@@ -1080,8 +1080,8 @@ Spacer(modifier = Modifier.height(16.dp))
 )
     Text(
     text = "語音內容：$recognizedText",
-    color = Color.White,
-    fontSize = 16.sp,
+    color = Color(0xFFFFD54F),
+    fontSize = 18.sp,
     fontWeight = FontWeight.Bold
 )
                     // Danger indicator if any danger items detected
