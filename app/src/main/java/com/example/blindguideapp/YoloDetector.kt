@@ -116,7 +116,9 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
         val isDanger: Boolean,
         val proximity: Float,
         val distanceMeters: Float = 0f,
-        val direction: String = "正前方"
+        val direction: String = "正前方",
+        val isDangerous: Boolean = false,
+        val priority: Float = 0.0f
     )
 
     init {
@@ -225,18 +227,10 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
                 if (limit.max != null && aspectRatio > limit.max) continue
             }
 
-            val area = w * h
             // 1. 檢查這個物件有沒有在我們的設定清單裡，如果沒有，直接跳過不偵測！
-            val threshold = areaThresholds2M[labelEn]
-            if (threshold == null) {
+            if (!areaThresholds2M.containsKey(labelEn)) {
                 continue // 清單外的不必要物品（如長頸鹿、微波爐），直接無視，不加入偵測清單
             }
-
-            // 2. 有在清單內，才計算有沒有達到 2 公尺的危險距離
-            val isDanger = area >= threshold
-            val proximity = area / threshold
-            // Estimate default distance from area ratio: at proximity=1.0, distance is 2.0 meters
-            val distanceMeters = 2.0f / (proximity.coerceAtLeast(0.01f))
 
             val centerX = (rx1 + rx2) / 2f
             val direction = when {
@@ -244,6 +238,20 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
                 centerX > 0.67f -> "右前方"
                 else -> "正前方"
             }
+
+            // 2. 幾何距離與 2 公尺預警判定 (不再使用面積判定)
+            val distanceToBottom = (1.0f - ry2).coerceAtLeast(0.01f)
+            val isDangerous = distanceToBottom <= 0.45f
+            val priority = if (isDangerous) {
+                (1.0f - distanceToBottom) * 10f
+            } else {
+                0.0f
+            }
+
+            // 對應原本欄位，以維持外部串接正常
+            val isDanger = isDangerous
+            val proximity = 0.45f / distanceToBottom
+            val distanceMeters = 2.0f / proximity
 
             detections.add(
                 Detection(
@@ -258,7 +266,9 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
                     isDanger = isDanger,
                     proximity = proximity,
                     distanceMeters = distanceMeters,
-                    direction = direction
+                    direction = direction,
+                    isDangerous = isDangerous,
+                    priority = priority
                 )
             )
         }
