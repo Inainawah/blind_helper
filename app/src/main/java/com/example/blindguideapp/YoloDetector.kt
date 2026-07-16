@@ -6,6 +6,7 @@ import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.support.image.TensorImage
 import org.tensorflow.lite.support.image.ImageProcessor
+import org.tensorflow.lite.support.image.ops.ResizeWithCropOrPadOp
 import org.tensorflow.lite.support.image.ops.ResizeOp
 import org.tensorflow.lite.support.image.ops.Rot90Op
 import org.tensorflow.lite.support.common.ops.NormalizeOp
@@ -141,35 +142,23 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
         }
     }
 
-    // 🛠️ 新增：正方形置中裁剪小工具，避免不同手機鏡頭比例導致物件拉伸變形
-    private fun cropCenterSquare(srcBmp: Bitmap): Bitmap {
-        val width = srcBmp.width
-        val height = srcBmp.height
-        
-        // 以短邊為基準裁出正方形，防止超出邊界
-        val squareSize = if (width < height) width else height
-        
-        val xOffset = (width - squareSize) / 2
-        val yOffset = (height - squareSize) / 2
-        
-        // 切出正方形的中間區塊並回傳
-        return Bitmap.createBitmap(srcBmp, xOffset, yOffset, squareSize, squareSize)
-    }
-
     fun detect(bitmap: Bitmap, rotationDegrees: Int): List<Detection> {
         val interp = interpreter ?: return emptyList()
 
-        // 🎯 關鍵優化：先將相機原始圖片裁切成正中間的正方形
-        val squareBitmap = cropCenterSquare(bitmap)
+        // 🎯 關鍵優化：計算正方形尺寸，後續由 ImageProcessor.ResizeWithCropOrPadOp 於 Native 進行置中裁剪，避免額外 Bitmap 記憶體分配
+        val width = bitmap.width
+        val height = bitmap.height
+        val squareSize = if (width < height) width else height
 
         // 1. Efficient preprocessing using TFLite Support Library
         val tensorImage = TensorImage(if (isQuantized) DataType.UINT8 else DataType.FLOAT32)
-        tensorImage.load(squareBitmap)
+        tensorImage.load(bitmap)
 
         // Convert clockwise rotation to counter-clockwise for Rot90Op
         val k = (360 - rotationDegrees) % 360 / 90
 
         val imageProcessor = ImageProcessor.Builder()
+            .add(ResizeWithCropOrPadOp(squareSize, squareSize))
             .add(ResizeOp(inputWidth, inputHeight, ResizeOp.ResizeMethod.BILINEAR))
             .apply {
                 if (k > 0) {
