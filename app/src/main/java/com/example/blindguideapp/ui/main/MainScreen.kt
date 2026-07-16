@@ -8,6 +8,7 @@ import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.hardware.camera2.CaptureRequest
 import android.speech.tts.TextToSpeech
+import android.media.AudioAttributes
 import android.content.Intent
 import android.os.Bundle
 import android.speech.RecognitionListener
@@ -50,7 +51,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalConfiguration
@@ -135,6 +138,11 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
                 ttsInitialized = true
             }
         }
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
+        ttsEngine.setAudioAttributes(audioAttributes)
         ttsEngine.language = Locale.CHINESE
         tts = ttsEngine
 
@@ -146,6 +154,11 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
 
     // Initialize YOLO Detector and Hazard Tracker
     val detector = remember { YoloDetector(context, "yolo26s_float32.tflite") }
+    DisposableEffect(detector) {
+        onDispose {
+            detector.close()
+        }
+    }
     val tracker = remember { HazardTracker() }
 
     // State parameters
@@ -366,6 +379,8 @@ DisposableEffect(Unit) {
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
+                        .zIndex(1f)
+                        .background(Color(0xFF121212))
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
@@ -574,6 +589,7 @@ DisposableEffect(Unit) {
                     modifier = Modifier
                         .fillMaxHeight()
                         .aspectRatio(1f)
+                        .clipToBounds()
                         .border(2.dp, Color.White.copy(alpha = 0.3f))
                         .background(Color.Black)
                 ) {
@@ -581,6 +597,7 @@ DisposableEffect(Unit) {
                     AndroidView(
                         factory = { ctx ->
                             val previewView = PreviewView(ctx).apply {
+                                implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                                 scaleType = PreviewView.ScaleType.FILL_CENTER
                             }
 
@@ -642,7 +659,9 @@ DisposableEffect(Unit) {
                                     if (bitmap != null) {
                                         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
                                         val results = detector.detect(bitmap, rotationDegrees)
-                                        detections = results
+                                        coroutineScope.launch {
+                                            detections = results
+                                        }
                                     }
                                     imageProxy.close()
                                 }
@@ -704,6 +723,7 @@ DisposableEffect(Unit) {
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
+                        .background(Color(0xFF121212))
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
@@ -716,8 +736,16 @@ DisposableEffect(Unit) {
             isListening = false
         } else {
             recognizedText = "正在聆聽..."
-            speechRecognizer.startListening(speechIntent)
-            isListening = true
+            try {
+                speechRecognizer.startListening(speechIntent)
+                isListening = true
+            } catch (e: SecurityException) {
+                recognizedText = "缺乏錄音權限，請開啟設定"
+                isListening = false
+            } catch (e: Exception) {
+                recognizedText = "語音辨識啟動失敗"
+                isListening = false
+            }
         }
     }
 )
@@ -865,12 +893,14 @@ Spacer(modifier = Modifier.height(16.dp))
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(300.dp)
+                        .clipToBounds()
                         .background(Color.Black)
                 ) {
                     // CameraX PreviewView with optimized Camera2 settings
                     AndroidView(
                         factory = { ctx ->
                             val previewView = PreviewView(ctx).apply {
+                                implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                                 scaleType = PreviewView.ScaleType.FILL_CENTER
                             }
 
@@ -932,7 +962,9 @@ Spacer(modifier = Modifier.height(16.dp))
                                     if (bitmap != null) {
                                         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
                                         val results = detector.detect(bitmap, rotationDegrees)
-                                        detections = results
+                                        coroutineScope.launch {
+                                            detections = results
+                                        }
                                     }
                                     imageProxy.close()
                                 }
@@ -1073,8 +1105,16 @@ Spacer(modifier = Modifier.height(16.dp))
             isListening = false
         } else {
             recognizedText = "正在聆聽..."
-            speechRecognizer.startListening(speechIntent)
-            isListening = true
+            try {
+                speechRecognizer.startListening(speechIntent)
+                isListening = true
+            } catch (e: SecurityException) {
+                recognizedText = "缺乏錄音權限，請開啟設定"
+                isListening = false
+            } catch (e: Exception) {
+                recognizedText = "語音辨識啟動失敗"
+                isListening = false
+            }
         }
     }
 )
