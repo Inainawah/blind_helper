@@ -8,6 +8,7 @@ import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.hardware.camera2.CaptureRequest
 import android.speech.tts.TextToSpeech
+import android.media.AudioAttributes
 import android.content.Intent
 import android.os.Bundle
 import android.speech.RecognitionListener
@@ -135,6 +136,11 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
                 ttsInitialized = true
             }
         }
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
+        ttsEngine.setAudioAttributes(audioAttributes)
         ttsEngine.language = Locale.CHINESE
         tts = ttsEngine
 
@@ -146,6 +152,11 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
 
     // Initialize YOLO Detector and Hazard Tracker
     val detector = remember { YoloDetector(context, "yolo26s_float32.tflite") }
+    DisposableEffect(detector) {
+        onDispose {
+            detector.close()
+        }
+    }
     val tracker = remember { HazardTracker() }
 
     // State parameters
@@ -642,7 +653,9 @@ DisposableEffect(Unit) {
                                     if (bitmap != null) {
                                         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
                                         val results = detector.detect(bitmap, rotationDegrees)
-                                        detections = results
+                                        coroutineScope.launch {
+                                            detections = results
+                                        }
                                     }
                                     imageProxy.close()
                                 }
@@ -716,8 +729,16 @@ DisposableEffect(Unit) {
             isListening = false
         } else {
             recognizedText = "正在聆聽..."
-            speechRecognizer.startListening(speechIntent)
-            isListening = true
+            try {
+                speechRecognizer.startListening(speechIntent)
+                isListening = true
+            } catch (e: SecurityException) {
+                recognizedText = "缺乏錄音權限，請開啟設定"
+                isListening = false
+            } catch (e: Exception) {
+                recognizedText = "語音辨識啟動失敗"
+                isListening = false
+            }
         }
     }
 )
@@ -932,7 +953,9 @@ Spacer(modifier = Modifier.height(16.dp))
                                     if (bitmap != null) {
                                         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
                                         val results = detector.detect(bitmap, rotationDegrees)
-                                        detections = results
+                                        coroutineScope.launch {
+                                            detections = results
+                                        }
                                     }
                                     imageProxy.close()
                                 }
@@ -1073,8 +1096,16 @@ Spacer(modifier = Modifier.height(16.dp))
             isListening = false
         } else {
             recognizedText = "正在聆聽..."
-            speechRecognizer.startListening(speechIntent)
-            isListening = true
+            try {
+                speechRecognizer.startListening(speechIntent)
+                isListening = true
+            } catch (e: SecurityException) {
+                recognizedText = "缺乏錄音權限，請開啟設定"
+                isListening = false
+            } catch (e: Exception) {
+                recognizedText = "語音辨識啟動失敗"
+                isListening = false
+            }
         }
     }
 )
