@@ -9,6 +9,24 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+app.use((req, res, next) => {
+    const startTime = Date.now();
+
+    console.log(
+        `[REQUEST] ${req.method} ${req.originalUrl}`
+    );
+
+    res.on("finish", () => {
+        const elapsedTime = Date.now() - startTime;
+
+        console.log(
+            `[RESPONSE] ${req.method} ${req.originalUrl} ` +
+            `${res.statusCode} ${elapsedTime}ms`
+        );
+    });
+
+    next();
+});
 
 /* =========================================================
    共用設定
