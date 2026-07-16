@@ -51,7 +51,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalConfiguration
@@ -377,6 +379,8 @@ DisposableEffect(Unit) {
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
+                        .zIndex(1f)
+                        .background(Color(0xFF121212))
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
@@ -585,6 +589,7 @@ DisposableEffect(Unit) {
                     modifier = Modifier
                         .fillMaxHeight()
                         .aspectRatio(1f)
+                        .clipToBounds()
                         .border(2.dp, Color.White.copy(alpha = 0.3f))
                         .background(Color.Black)
                 ) {
@@ -592,6 +597,7 @@ DisposableEffect(Unit) {
                     AndroidView(
                         factory = { ctx ->
                             val previewView = PreviewView(ctx).apply {
+                                implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                                 scaleType = PreviewView.ScaleType.FILL_CENTER
                             }
 
@@ -717,6 +723,7 @@ DisposableEffect(Unit) {
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
+                        .background(Color(0xFF121212))
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
@@ -886,12 +893,14 @@ Spacer(modifier = Modifier.height(16.dp))
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(300.dp)
+                        .clipToBounds()
                         .background(Color.Black)
                 ) {
                     // CameraX PreviewView with optimized Camera2 settings
                     AndroidView(
                         factory = { ctx ->
                             val previewView = PreviewView(ctx).apply {
+                                implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                                 scaleType = PreviewView.ScaleType.FILL_CENTER
                             }
 
