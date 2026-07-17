@@ -127,6 +127,7 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
     val lifecycleOwner = LocalLifecycleOwner.current
 
     val lastAlertFinishedTime = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    val lastAlertStartTime = remember { java.util.concurrent.atomic.AtomicLong(0L) }
 
     // Initialize TTS
     var tts by remember { mutableStateOf<TextToSpeech?>(null) }
@@ -143,6 +144,7 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .build()
         ttsEngine.setAudioAttributes(audioAttributes)
+        ttsEngine.setSpeechRate(1.3f)
         ttsEngine.language = Locale.CHINESE
         tts = ttsEngine
 
@@ -286,22 +288,28 @@ DisposableEffect(Unit) {
 
         val currentTime = System.currentTimeMillis()
         val lockedUntil = lastAlertFinishedTime.get()
+        val lastSpeakTime = lastAlertStartTime.get()
 
         // Urgent threat: rapid approach (rate >= 20000) or high priority (priority >= 2.5)
         val isUrgent = rate >= 20000f || priority >= 2.5f
 
         // Cooldown Preemption Rule: Urgent hazards immediately bypass the 3s cooldown
         // if they represent a new class OR a significant increase in priority (>0.5) for the same class.
-        val shouldPreempt = isUrgent && (det.classId != lastSpokenClassId || priority >= lastSpokenPriority + 0.5f)
+        // Also enforce a minimum interval (e.g. 1.0s) since last alert started, to prevent stutters between classes.
+        val minSpeakDurationMs = 1000L
+        val hasSpokenLongEnough = currentTime - lastSpeakTime >= minSpeakDurationMs
+        val shouldPreempt = isUrgent && hasSpokenLongEnough && (det.classId != lastSpokenClassId || priority >= lastSpokenPriority + 0.5f)
 
         if (currentTime >= lockedUntil || shouldPreempt) {
             val name = det.labelTw
             val alertMsg = "${det.direction}有 $name"
 
             // Shorten cooldown for urgent preemptive alerts to remain highly responsive
-            val estimatedSpeechDurationMs = alertMsg.length * 350L + 500L
+            // Scaled for 1.3f speech rate
+            val estimatedSpeechDurationMs = alertMsg.length * 250L + 300L
             val cooldownMs = if (isUrgent) 1000L else 3000L
             lastAlertFinishedTime.set(currentTime + estimatedSpeechDurationMs + cooldownMs)
+            lastAlertStartTime.set(currentTime) // Record the start time of the speech
             
             lastSpokenClassId = det.classId
             lastSpokenPriority = priority
