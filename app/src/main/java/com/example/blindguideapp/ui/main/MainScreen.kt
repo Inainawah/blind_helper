@@ -307,7 +307,21 @@ DisposableEffect(Unit) {
             lastSpokenPriority = priority
 
             // Use QUEUE_FLUSH to preempt immediately
-            tts?.speak(alertMsg, TextToSpeech.QUEUE_FLUSH, null, "alert_${currentTime}")
+            if (isUrgent) {
+    tts?.speak(
+        alertMsg,
+        TextToSpeech.QUEUE_FLUSH,
+        null,
+        "urgent_alert_$currentTime"
+    )
+} else if (tts?.isSpeaking != true) {
+    tts?.speak(
+        alertMsg,
+        TextToSpeech.QUEUE_ADD,
+        null,
+        "normal_alert_$currentTime"
+    )
+}
 
             // Log entry
             val timeStamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
@@ -789,7 +803,7 @@ Spacer(modifier = Modifier.height(16.dp))
                                 currentCamera.cameraControl.enableTorch(isFlashlightOn)
                                 tts?.speak(
     if (isFlashlightOn) "手電筒已開啟" else "手電筒已關閉",
-    TextToSpeech.QUEUE_FLUSH,
+    TextToSpeech.QUEUE_ADD,
     null,
     "flashlight_${System.currentTimeMillis()}"
 )
@@ -1061,7 +1075,7 @@ Spacer(modifier = Modifier.height(16.dp))
                                     currentCamera.cameraControl.enableTorch(isFlashlightOn)
                                     tts?.speak(
     if (isFlashlightOn) "手電筒已開啟" else "手電筒已關閉",
-    TextToSpeech.QUEUE_FLUSH,
+    TextToSpeech.QUEUE_ADD,
     null,
     "flashlight_${System.currentTimeMillis()}"
 )
@@ -1564,7 +1578,7 @@ suspend fun handleVoiceCommand(
     if (text.contains("哪裡") || text.contains("在哪")) {
         tts?.speak("正在查詢您目前的位置...", TextToSpeech.QUEUE_FLUSH, null, "reverse_geocode_start")
         val address = requestReverseGeocode(serverUrl, lat, lng)
-        tts?.speak("您目前的位置是：$address", TextToSpeech.QUEUE_FLUSH, null, "reverse_geocode_result")
+        tts?.speak("您目前的位置是：$address", TextToSpeech.QUEUE_ADD, null, "reverse_geocode_result")
         onDirectionsResult(null)
     } else {
         tts?.speak("正在規劃前往 $text 的路線...", TextToSpeech.QUEUE_FLUSH, null, "directions_start")
@@ -1573,7 +1587,7 @@ suspend fun handleVoiceCommand(
             val distanceStr = response.distance ?: ""
             val durationStr = response.duration ?: ""
             val summary = "規劃成功。全程約 ${distanceStr}，需要 ${durationStr}。指引已顯示在螢幕上。"
-            tts?.speak(summary, TextToSpeech.QUEUE_FLUSH, null, "directions_success")
+            tts?.speak(summary, TextToSpeech.QUEUE_ADD, null, "directions_success")
             
             val firstStep = response.steps?.firstOrNull()
             if (firstStep != null) {
