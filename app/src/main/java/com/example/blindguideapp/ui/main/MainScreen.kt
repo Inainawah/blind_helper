@@ -170,7 +170,7 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
     var lastSpokenPriority by remember { mutableStateOf(0f) }
     var isListening by remember { mutableStateOf(false) }
     var recognizedText by remember { mutableStateOf("尚未收到語音指令") }
-    var serverUrl by remember { mutableStateOf("http://172.20.10.3:3000") }
+    var serverUrl by remember { mutableStateOf("https://believable-emotion-production-5e75.up.railway.app") }
     var navigationResult by remember { mutableStateOf<DirectionsResponse?>(null) }
     var showNavigationTab by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
