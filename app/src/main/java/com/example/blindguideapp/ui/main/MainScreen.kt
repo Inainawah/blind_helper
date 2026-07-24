@@ -1478,8 +1478,7 @@ data class ReverseGeocodeResponse(
 
 @Serializable
 data class DirectionsRequest(
-    val current_latitude: Double,
-    val current_longitude: Double,
+   val start: String,
     val destination: String
 )
 
@@ -1556,7 +1555,7 @@ suspend fun requestReverseGeocode(serverUrl: String, lat: Double, lng: Double): 
 
 suspend fun requestDirections(serverUrl: String, lat: Double, lng: Double, destination: String): DirectionsResponse = withContext(Dispatchers.IO) {
     val jsonMediaType = "application/json; charset=utf-8".toMediaType()
-    val reqData = DirectionsRequest(lat, lng, destination)
+    val reqData = DirectionsRequest(start = "$lat,$lng",destination = destination)
     val requestBody = json.encodeToString(DirectionsRequest.serializer(), reqData).toRequestBody(jsonMediaType)
     val request = Request.Builder()
         .url("$serverUrl/api/navigation/directions")
