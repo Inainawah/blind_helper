@@ -1596,10 +1596,19 @@ suspend fun handleVoiceCommand(
             val summary = "規劃成功。全程約 ${distanceStr}，需要 ${durationStr}。指引已顯示在螢幕上。"
             tts?.speak(summary, TextToSpeech.QUEUE_ADD, null, "directions_success")
             
-            val firstStep = response.steps?.firstOrNull()
-            if (firstStep != null) {
-                tts?.speak("第一步，${firstStep.instruction}，距離約 ${firstStep.distance}", TextToSpeech.QUEUE_ADD, null, "directions_first_step")
-            }
+            val steps = response.steps.orEmpty()
+
+steps.forEach { step ->
+    val instructionText =
+        "第 ${step.step_order} 步，${step.instruction}，距離約 ${step.distance}"
+
+    tts?.speak(
+        instructionText,
+        TextToSpeech.QUEUE_ADD,
+        null,
+        "direction_step_${step.step_order}"
+    )
+}
             onDirectionsResult(response)
         } else {
             val errorMsg = "導航規劃失敗，原因為 ${response.message ?: "未知錯誤"}"
