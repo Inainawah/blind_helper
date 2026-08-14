@@ -88,7 +88,9 @@ fun MainScreen(
 
     val permissions = arrayOf(
         Manifest.permission.CAMERA,
-        Manifest.permission.RECORD_AUDIO
+        Manifest.permission.RECORD_AUDIO,
+        Manifest.permission.ACCESS_FINE_LOCATION,
+    Manifest.permission.ACCESS_COARSE_LOCATION
     )
 
     // States
@@ -1504,28 +1506,51 @@ data class DirectionsResponse(
 private val json = Json { ignoreUnknownKeys = true }
 private val client = OkHttpClient()
 
+@SuppressLint("MissingPermission")
 fun getCurrentLocation(context: Context): Pair<Double, Double> {
-    val defaultLoc = Pair(25.175617, 121.450589)
-    if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-        return defaultLoc
+    val locationManager =
+        context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+
+    val hasFineLocation =
+        ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+    val hasCoarseLocation =
+        ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+    if (!hasFineLocation && !hasCoarseLocation) {
+        return Pair(0.0, 0.0)
     }
-    val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return defaultLoc
-    try {
-        val providers = locationManager.getProviders(true)
-        var bestLocation: Location? = null
-        for (provider in providers) {
-            val l = locationManager.getLastKnownLocation(provider) ?: continue
-            if (bestLocation == null || l.accuracy < bestLocation.accuracy) {
-                bestLocation = l
-            }
+
+    val providers = locationManager.getProviders(true)
+
+    var bestLocation: Location? = null
+
+    for (provider in providers) {
+        val location =
+            locationManager.getLastKnownLocation(provider) ?: continue
+
+        if (
+            bestLocation == null ||
+            location.time > bestLocation.time
+        ) {
+            bestLocation = location
         }
-        if (bestLocation != null) {
-            return Pair(bestLocation.latitude, bestLocation.longitude)
-        }
-    } catch (e: SecurityException) {
-        e.printStackTrace()
     }
-    return defaultLoc
+
+    return if (bestLocation != null) {
+        Pair(
+            bestLocation.latitude,
+            bestLocation.longitude
+        )
+    } else {
+        Pair(0.0, 0.0)
+    }
 }
 
 suspend fun requestReverseGeocode(serverUrl: String, lat: Double, lng: Double): String = withContext(Dispatchers.IO) {
