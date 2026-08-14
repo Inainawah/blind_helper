@@ -135,6 +135,17 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
     var tts by remember { mutableStateOf<TextToSpeech?>(null) }
     var ttsInitialized by remember { mutableStateOf(false) }
 
+    LaunchedEffect(ttsInitialized) {
+        if (ttsInitialized) {
+            tts?.speak(
+                "歡迎使用vigo。本 App 會透過相機，為您辨識障礙物，並用語音提醒您方向。請點擊螢幕右上角並說出目的地後，開始為您導航。",
+                TextToSpeech.QUEUE_FLUSH,
+                null,
+                "welcome_intro"
+            )
+        }
+    }
+
     DisposableEffect(Unit) {
         val ttsEngine = TextToSpeech(context) { status ->
             if (status == TextToSpeech.SUCCESS) {
