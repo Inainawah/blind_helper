@@ -10,6 +10,7 @@ import android.hardware.camera2.CaptureRequest
 import android.speech.tts.TextToSpeech
 import android.media.AudioAttributes
 import android.content.Intent
+import android.annotation.SuppressLint
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
