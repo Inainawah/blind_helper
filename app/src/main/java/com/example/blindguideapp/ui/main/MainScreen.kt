@@ -351,10 +351,10 @@ DisposableEffect(Unit) {
                 alertLogs.removeAt(alertLogs.size - 1)
             }
             val logMessage = if (isUrgent) {
-                "🔴 緊急警告: ${det.direction}有 $name 快速靠近 (優先度: ${String.format("%.1f", priority)})"
-            } else {
-                "⚠️ 危險警告: ${det.direction}有 $name (優先度: ${String.format("%.1f", priority)})"
-            }
+    "緊急警告: ${det.direction}有「$name」快速靠近"
+} else {
+    "危險警告: ${det.direction}有「$name」"
+}
             alertLogs.add(0, AlertLog(System.currentTimeMillis(), logMessage, timeStamp))
         }
     }
