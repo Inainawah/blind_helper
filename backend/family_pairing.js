@@ -1,0 +1,430 @@
+/*
+ * App 內建家屬模式（配對碼 + 導航紀錄列表 + 單趟詳情）。
+ *
+ * 與 family.js（即時地圖儀表板，目前前端網頁版本先擱置）是兩個獨立模組，
+ * 各自掛載於 /api 之下，互不影響、互不依賴。
+ *
+ * App 目前沒有登入機制，因此採用「裝置配對碼」：
+ *   1. App 第一次啟動時呼叫 POST /api/devices/register，
+ *      後端自動建立一組 users 資料列並產生 6 碼配對碼。
+ *   2. 家屬模式畫面顯示這組配對碼（也可以 POST /api/devices/:user_id/regenerate-code 換一組）。
+ *   3. 家屬模式的導航紀錄列表/詳情，皆以這組配對碼查詢
+ *      （GET /api/family/navigation-history?pairing_code=XXXXXX）。
+ *
+ * 因為建立裝置時就會建立一筆真正的 users 資料列並回傳 user_id，
+ * 所以既有的 /api/navigation/directions、/api/environment-logs 等 API
+ * 完全不用修改資料表結構，App 只要把這個 user_id 帶進既有呼叫即可。
+ */
+
+const express = require("express");
+const crypto = require("crypto");
+
+const db = require("./db");
+
+const router = express.Router();
+
+const PAIRING_CODE_PATTERN = /^\d{6}$/;
+
+function parsePositiveInteger(value) {
+    const number = Number(value);
+    if (!Number.isInteger(number) || number <= 0) {
+        return null;
+    }
+    return number;
+}
+
+function isValidPairingCode(value) {
+    return typeof value === "string" && PAIRING_CODE_PATTERN.test(value);
+}
+
+/**
+ * 產生一組尚未被使用的 6 碼配對碼。
+ * 碼空間有 900000 組，此 App 的預期使用量極低，用「先查詢再使用」已經足夠，
+ * 真正的併發碰撞則交給 device_profiles.pairing_code 的 UNIQUE 限制擋下。
+ */
+async function generateUniquePairingCode(connection) {
+    for (let attempt = 0; attempt < 10; attempt++) {
+        const code = String(Math.floor(100000 + Math.random() * 900000));
+        const [rows] = await connection.execute(
+            `SELECT 1 FROM device_profiles WHERE pairing_code = ? LIMIT 1`,
+            [code]
+        );
+        if (rows.length === 0) return code;
+    }
+    throw new Error("Failed to generate a unique pairing code");
+}
+
+async function resolveUserIdFromPairingCode(pairingCode) {
+    const [rows] = await db.execute(
+        `SELECT user_id FROM device_profiles WHERE pairing_code = ?`,
+        [pairingCode]
+    );
+    return rows[0]?.user_id ?? null;
+}
+
+/* =========================================================
+   1. 裝置註冊（沒有帳號的裝置，第一次啟動時呼叫一次）
+========================================================= */
+
+router.post("/devices/register", async (req, res) => {
+    try {
+        const { device_id, display_name } = req.body;
+
+        if (typeof device_id !== "string" || !device_id.trim()) {
+            return res.status(400).json({
+                success: false,
+                error: {
+                    code: "INVALID_REQUEST",
+                    message: "device_id 為必填欄位",
+                    retryable: false
+                }
+            });
+        }
+        const deviceId = device_id.trim();
+
+        const [existingRows] = await db.execute(
+            `SELECT user_id, pairing_code, display_name
+             FROM device_profiles WHERE device_id = ?`,
+            [deviceId]
+        );
+
+        if (existingRows.length > 0) {
+            const existing = existingRows[0];
+            return res.status(200).json({
+                success: true,
+                user_id: existing.user_id,
+                pairing_code: existing.pairing_code,
+                display_name: existing.display_name
+            });
+        }
+
+        const name =
+            typeof display_name === "string" && display_name.trim()
+                ? display_name.trim()
+                : "視障使用者";
+
+        // 此裝置沒有真實帳號，合成一組不會用來登入的 email/密碼雜湊，
+        // 只是為了滿足既有 users 表 email/password_hash 為必填的限制。
+        const syntheticEmail = `device-${deviceId}@blindhelper.local`;
+        const syntheticPasswordHash = crypto.randomBytes(32).toString("hex");
+
+        const connection = await db.getConnection();
+        try {
+            await connection.beginTransaction();
+
+            const [userResult] = await connection.execute(
+                `INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)`,
+                [name, syntheticEmail, syntheticPasswordHash]
+            );
+            const userId = userResult.insertId;
+
+            const pairingCode = await generateUniquePairingCode(connection);
+
+            await connection.execute(
+                `INSERT INTO device_profiles (user_id, device_id, pairing_code, display_name)
+                 VALUES (?, ?, ?, ?)`,
+                [userId, deviceId, pairingCode, name]
+            );
+
+            await connection.commit();
+
+            return res.status(201).json({
+                success: true,
+                user_id: userId,
+                pairing_code: pairingCode,
+                display_name: name
+            });
+        } catch (error) {
+            await connection.rollback();
+
+            // 極少數併發下，兩個請求同時註冊同一個 device_id：
+            // 其中一個會撞到 UNIQUE 限制，直接回查既有資料即可。
+            if (error?.code === "ER_DUP_ENTRY") {
+                const [rows] = await db.execute(
+                    `SELECT user_id, pairing_code, display_name
+                     FROM device_profiles WHERE device_id = ?`,
+                    [deviceId]
+                );
+                if (rows.length > 0) {
+                    return res.status(200).json({
+                        success: true,
+                        user_id: rows[0].user_id,
+                        pairing_code: rows[0].pairing_code,
+                        display_name: rows[0].display_name
+                    });
+                }
+            }
+
+            throw error;
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error("Register device failed:", error);
+        return res.status(500).json({
+            success: false,
+            error: {
+                code: "DEVICE_REGISTER_FAILED",
+                message: "裝置註冊失敗",
+                retryable: false
+            }
+        });
+    }
+});
+
+/* =========================================================
+   2. 重新產生配對碼（對應「修改配對碼」按鈕）
+========================================================= */
+
+router.post("/devices/:user_id/regenerate-code", async (req, res) => {
+    const userId = parsePositiveInteger(req.params.user_id);
+
+    if (userId == null) {
+        return res.status(400).json({
+            success: false,
+            error: {
+                code: "INVALID_USER_ID",
+                message: "user_id 必須是大於 0 的整數",
+                retryable: false
+            }
+        });
+    }
+
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        const newCode = await generateUniquePairingCode(connection);
+
+        const [result] = await connection.execute(
+            `UPDATE device_profiles SET pairing_code = ? WHERE user_id = ?`,
+            [newCode, userId]
+        );
+
+        if (result.affectedRows === 0) {
+            await connection.rollback();
+            return res.status(404).json({
+                success: false,
+                error: {
+                    code: "DEVICE_PROFILE_NOT_FOUND",
+                    message: "找不到此裝置的配對資料",
+                    retryable: false
+                }
+            });
+        }
+
+        await connection.commit();
+        return res.status(200).json({ success: true, pairing_code: newCode });
+    } catch (error) {
+        await connection.rollback();
+        console.error("Regenerate pairing code failed:", error);
+        return res.status(500).json({
+            success: false,
+            error: {
+                code: "REGENERATE_CODE_FAILED",
+                message: "重新產生配對碼失敗",
+                retryable: false
+            }
+        });
+    } finally {
+        connection.release();
+    }
+});
+
+/* =========================================================
+   3. 導航紀錄列表（家屬模式主畫面）
+========================================================= */
+
+router.get("/family/navigation-history", async (req, res) => {
+    try {
+        const pairingCode = String(req.query.pairing_code || "").trim();
+
+        if (!isValidPairingCode(pairingCode)) {
+            return res.status(400).json({
+                success: false,
+                error: {
+                    code: "INVALID_PAIRING_CODE",
+                    message: "pairing_code 必須是 6 碼數字",
+                    retryable: false
+                }
+            });
+        }
+
+        const userId = await resolveUserIdFromPairingCode(pairingCode);
+        if (userId == null) {
+            return res.status(404).json({
+                success: false,
+                error: {
+                    code: "PAIRING_CODE_NOT_FOUND",
+                    message: "找不到此配對碼對應的裝置",
+                    retryable: false
+                }
+            });
+        }
+
+        const [rows] = await db.execute(
+            `SELECT
+                nr.navigation_id, nr.start_address, nr.end_address,
+                nr.distance_meters, nr.duration_seconds,
+                nr.actual_distance_meters, nr.actual_duration_seconds,
+                nr.status, nr.started_at, nr.ended_at, nr.created_at,
+                COUNT(od.detection_id) AS alert_count
+             FROM navigation_records nr
+             LEFT JOIN object_detections od ON od.navigation_id = nr.navigation_id
+             WHERE nr.user_id = ?
+             GROUP BY nr.navigation_id
+             ORDER BY nr.created_at DESC
+             LIMIT 100`,
+            [userId]
+        );
+
+        return res.status(200).json({
+            success: true,
+            pairing_code: pairingCode,
+            records: rows.map((row) => ({
+                navigation_id: row.navigation_id,
+                start_address: row.start_address,
+                end_address: row.end_address,
+                distance_meters: row.actual_distance_meters ?? row.distance_meters,
+                duration_seconds: row.actual_duration_seconds ?? row.duration_seconds,
+                alert_count: Number(row.alert_count),
+                status: row.status,
+                started_at: row.started_at,
+                ended_at: row.ended_at,
+                created_at: row.created_at
+            }))
+        });
+    } catch (error) {
+        console.error("Get navigation history failed:", error);
+        return res.status(500).json({
+            success: false,
+            error: {
+                code: "NAVIGATION_HISTORY_FAILED",
+                message: "查詢導航紀錄失敗",
+                retryable: false
+            }
+        });
+    }
+});
+
+/* =========================================================
+   4. 單趟導航詳情（「查看詳情」：路徑地圖 + 警報標記）
+========================================================= */
+
+router.get("/family/navigation-history/:navigation_id", async (req, res) => {
+    try {
+        const navigationId = parsePositiveInteger(req.params.navigation_id);
+        const pairingCode = String(req.query.pairing_code || "").trim();
+
+        if (navigationId == null || !isValidPairingCode(pairingCode)) {
+            return res.status(400).json({
+                success: false,
+                error: {
+                    code: "INVALID_REQUEST",
+                    message: "navigation_id 與 pairing_code 格式不正確",
+                    retryable: false
+                }
+            });
+        }
+
+        const userId = await resolveUserIdFromPairingCode(pairingCode);
+        if (userId == null) {
+            return res.status(404).json({
+                success: false,
+                error: {
+                    code: "PAIRING_CODE_NOT_FOUND",
+                    message: "找不到此配對碼對應的裝置",
+                    retryable: false
+                }
+            });
+        }
+
+        const [navRows] = await db.execute(
+            `SELECT navigation_id, start_address, end_address,
+                    start_latitude, start_longitude, end_latitude, end_longitude,
+                    distance_meters, duration_seconds,
+                    actual_distance_meters, actual_duration_seconds,
+                    route_summary, status, started_at, ended_at, created_at
+             FROM navigation_records
+             WHERE navigation_id = ? AND user_id = ?`,
+            [navigationId, userId]
+        );
+
+        const record = navRows[0];
+        if (!record) {
+            return res.status(404).json({
+                success: false,
+                error: {
+                    code: "NAVIGATION_NOT_FOUND",
+                    message: "找不到此導航紀錄，或此配對碼無權限查看",
+                    retryable: false
+                }
+            });
+        }
+
+        // 路徑取自建立路線時儲存的 route_summary（規劃路線，非事後回放的實際軌跡）。
+        const path = [];
+        try {
+            const summary = record.route_summary ? JSON.parse(record.route_summary) : null;
+            for (const step of summary?.steps ?? []) {
+                if (step.start_location) path.push(step.start_location);
+                if (step.end_location) path.push(step.end_location);
+            }
+        } catch (parseError) {
+            console.error("Parse route_summary failed:", parseError.message);
+        }
+
+        const [alertRows] = await db.execute(
+            `SELECT detection_id, object_name, confidence, description,
+                    latitude, longitude, created_at
+             FROM object_detections
+             WHERE navigation_id = ?
+             ORDER BY created_at ASC`,
+            [navigationId]
+        );
+
+        return res.status(200).json({
+            success: true,
+            navigation: {
+                navigation_id: record.navigation_id,
+                start_address: record.start_address,
+                end_address: record.end_address,
+                start_location:
+                    record.start_latitude != null
+                        ? { lat: Number(record.start_latitude), lng: Number(record.start_longitude) }
+                        : null,
+                end_location:
+                    record.end_latitude != null
+                        ? { lat: Number(record.end_latitude), lng: Number(record.end_longitude) }
+                        : null,
+                distance_meters: record.actual_distance_meters ?? record.distance_meters,
+                duration_seconds: record.actual_duration_seconds ?? record.duration_seconds,
+                status: record.status,
+                started_at: record.started_at,
+                ended_at: record.ended_at
+            },
+            path,
+            alerts: alertRows.map((row) => ({
+                detection_id: row.detection_id,
+                object_name: row.object_name,
+                confidence: row.confidence == null ? null : Number(row.confidence),
+                description: row.description,
+                latitude: row.latitude == null ? null : Number(row.latitude),
+                longitude: row.longitude == null ? null : Number(row.longitude),
+                occurred_at: row.created_at
+            }))
+        });
+    } catch (error) {
+        console.error("Get navigation detail failed:", error);
+        return res.status(500).json({
+            success: false,
+            error: {
+                code: "NAVIGATION_DETAIL_FAILED",
+                message: "查詢導航詳情失敗",
+                retryable: false
+            }
+        });
+    }
+});
+
+module.exports = router;

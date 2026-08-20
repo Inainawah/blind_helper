@@ -1,7 +1,20 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.compose.compiler)
   alias(libs.plugins.kotlin.serialization)
+}
+
+// local.properties 已被根目錄 .gitignore 排除，不會進 git，
+// 家屬模式「查看詳情」地圖用的 Maps SDK for Android 金鑰放在這裡：
+// local.properties 加一行 GOOGLE_MAPS_SDK_FOR_ANDROID_KEY=你的金鑰
+val localProperties = Properties().apply {
+    val localFile = rootProject.file("local.properties")
+    if (localFile.exists()) {
+        load(FileInputStream(localFile))
+    }
 }
 
 android {
@@ -13,6 +26,9 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+
+        manifestPlaceholders["MAPS_API_KEY"] =
+            localProperties.getProperty("GOOGLE_MAPS_SDK_FOR_ANDROID_KEY", "")
     }
 
     buildTypes {
@@ -100,4 +116,11 @@ dependencies {
   // Networking and JSON
   implementation("com.squareup.okhttp3:okhttp:4.12.0")
   implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+
+  // FusedLocationProviderClient，供三階段轉彎提示模組（navigation 套件）使用
+  implementation(libs.play.services.location)
+
+  // 家屬模式「查看詳情」路線地圖
+  implementation(libs.play.services.maps)
+  implementation(libs.maps.compose)
 }

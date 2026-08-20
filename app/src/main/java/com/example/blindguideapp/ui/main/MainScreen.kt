@@ -73,6 +73,14 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation3.runtime.NavKey
 import com.example.blindguideapp.YoloDetector
+import com.example.blindguideapp.data.DeviceIdentityManager
+import com.example.blindguideapp.data.DeviceProfile
+import com.example.blindguideapp.navigation.CompassManager
+import com.example.blindguideapp.navigation.FusedLocationTracker
+import com.example.blindguideapp.navigation.GeoPoint
+import com.example.blindguideapp.navigation.GuidanceVibrator
+import com.example.blindguideapp.navigation.TurnByTurnGuide
+import com.example.blindguideapp.ui.family.FamilyModeScreen
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -80,12 +88,30 @@ import java.util.concurrent.Executors
 
 data class AlertLog(val id: Long, val message: String, val timestamp: String)
 
+/** 盲人模式（既有的相機/導航 UI）／家屬模式（新增）。 */
+private enum class AppMode { BLIND, FAMILY }
+
 @Composable
 fun MainScreen(
     onItemClick: (NavKey) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+
+    var appMode by remember { mutableStateOf(AppMode.BLIND) }
+    var serverUrl by remember { mutableStateOf("https://believable-emotion-production-5e75.up.railway.app") }
+
+    // 裝置配對碼身分（見 data/DeviceIdentity.kt），家屬模式跟盲人模式共用同一份，
+    // 這樣家屬模式一打開就能立刻看到自己這台裝置的配對碼與導航紀錄。
+    val deviceIdentityManager = remember { DeviceIdentityManager(context) }
+    var deviceProfile by remember { mutableStateOf(deviceIdentityManager.cachedProfile()) }
+    val identityCoroutineScope = rememberCoroutineScope()
+
+    LaunchedEffect(serverUrl) {
+        if (deviceProfile == null) {
+            deviceProfile = deviceIdentityManager.ensureRegistered(serverUrl)
+        }
+    }
 
     val permissions = arrayOf(
         Manifest.permission.CAMERA,
@@ -117,7 +143,30 @@ fun MainScreen(
     }
 
     if (hasPermissions) {
-        CameraDetectionLayout(modifier)
+        when (appMode) {
+            AppMode.BLIND -> CameraDetectionLayout(
+                serverUrl = serverUrl,
+                onServerUrlChange = { serverUrl = it },
+                deviceProfile = deviceProfile,
+                onSwitchToFamilyMode = { appMode = AppMode.FAMILY },
+                modifier = modifier
+            )
+
+            AppMode.FAMILY -> FamilyModeScreen(
+                serverUrl = serverUrl,
+                deviceProfile = deviceProfile,
+                onRegenerateCode = {
+                    identityCoroutineScope.launch {
+                        val newCode = deviceIdentityManager.regenerateCode(serverUrl)
+                        if (newCode != null) {
+                            deviceProfile = deviceProfile?.copy(pairingCode = newCode)
+                        }
+                    }
+                },
+                onSwitchToBlindMode = { appMode = AppMode.BLIND },
+                modifier = modifier
+            )
+        }
     } else {
         PermissionDeniedScreen(onRequestPermission = { launcher.launch(permissions) })
     }
@@ -125,7 +174,13 @@ fun MainScreen(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun CameraDetectionLayout(modifier: Modifier = Modifier) {
+fun CameraDetectionLayout(
+    serverUrl: String,
+    onServerUrlChange: (String) -> Unit,
+    deviceProfile: DeviceProfile?,
+    onSwitchToFamilyMode: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -177,6 +232,24 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
     }
     val tracker = remember { HazardTracker() }
 
+    // ===== 視障三階段轉彎導航模組 =====
+    // 嵌入既有的 Location/Routes 處理流程之下，不改動既有相機/警示 UI。
+    val guidanceVibrator = remember { GuidanceVibrator(context) }
+    val fusedLocationTracker = remember { FusedLocationTracker(context) }
+    var compassAzimuth by remember { mutableStateOf(0f) }
+    val compassManager = remember {
+        CompassManager(context) { azimuth -> compassAzimuth = azimuth }
+    }
+    var activeGuide by remember { mutableStateOf<TurnByTurnGuide?>(null) }
+
+    DisposableEffect(Unit) {
+        compassManager.start()
+        onDispose {
+            compassManager.stop()
+            fusedLocationTracker.stop()
+        }
+    }
+
     // State parameters
     var detections by remember { mutableStateOf<List<YoloDetector.Detection>>(emptyList()) }
     var isFlashlightOn by remember { mutableStateOf(false) }
@@ -186,10 +259,12 @@ fun CameraDetectionLayout(modifier: Modifier = Modifier) {
     var lastSpokenPriority by remember { mutableStateOf(0f) }
     var isListening by remember { mutableStateOf(false) }
     var recognizedText by remember { mutableStateOf("尚未收到語音指令") }
-    var serverUrl by remember { mutableStateOf("https://believable-emotion-production-5e75.up.railway.app") }
     var navigationResult by remember { mutableStateOf<DirectionsResponse?>(null) }
     var showNavigationTab by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
+    // 目前這趟導航在後端的 navigation_id，供相機警報寫回 /api/environment-logs
+    // 以及開始/結束時通知 /api/navigation/:id/start、/finish 使用（見下方 LaunchedEffect）。
+    var currentNavigationId by remember { mutableStateOf<Int?>(null) }
     val coroutineScope = rememberCoroutineScope()
 
 val speechRecognizer = remember {
@@ -236,7 +311,7 @@ DisposableEffect(Unit) {
                 if (!text.isNullOrBlank()) {
                     val (lat, lng) = getCurrentLocation(context)
                     coroutineScope.launch {
-                        handleVoiceCommand(context, text, serverUrl, lat, lng, tts) { result ->
+                        handleVoiceCommand(context, text, serverUrl, lat, lng, deviceProfile?.userId, tts) { result ->
                             navigationResult = result
                             if (result != null || text.contains("哪裡") || text.contains("在哪")) {
                                 showNavigationTab = true
@@ -268,6 +343,75 @@ DisposableEffect(Unit) {
         speechRecognizer.destroy()
     }
 }
+
+    // 導航結果一旦更新（使用者說出目的地並取得路線，或結束導航），
+    // 就啟動/停止三階段轉彎提示。既有的 navigationResult 狀態與 UI 完全不受影響。
+    LaunchedEffect(navigationResult) {
+        fusedLocationTracker.stop()
+        activeGuide = null
+
+        val result = navigationResult
+        val navigationId = result?.navigation_id
+        val userId = deviceProfile?.userId
+        currentNavigationId = navigationId
+
+        // 通知後端這趟導航「開始了」，讓家屬模式看到的 started_at/status 正確
+        // （見 backend/server.js -> PATCH /api/navigation/:id/start）。
+        if (result?.success == true && navigationId != null && userId != null) {
+            startNavigationSession(serverUrl, navigationId, userId)
+        }
+
+        val steps = result?.steps
+        if (result?.success != true || steps.isNullOrEmpty()) return@LaunchedEffect
+
+        val guideSteps = steps.mapNotNull { step ->
+            val start = step.start_location
+            val end = step.end_location
+            if (start == null || end == null) {
+                null
+            } else {
+                TurnByTurnGuide.GuideStep(
+                    order = step.step_order,
+                    instruction = step.instruction,
+                    start = GeoPoint(start.lat, start.lng),
+                    end = GeoPoint(end.lat, end.lng),
+                    maneuver = step.maneuver
+                )
+            }
+        }
+        if (guideSteps.isEmpty()) return@LaunchedEffect
+
+        val guide = TurnByTurnGuide(
+            steps = guideSteps,
+            speak = { text, flush ->
+                tts?.speak(
+                    text,
+                    if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
+                    null,
+                    "turn_guide_${System.currentTimeMillis()}"
+                )
+            },
+            vibrateShort = { guidanceVibrator.shortDoubleBuzz() },
+            onCompleted = {
+                if (navigationId != null && userId != null) {
+                    coroutineScope.launch {
+                        finishNavigationSession(serverUrl, navigationId, userId, "completed")
+                    }
+                }
+            }
+        )
+        activeGuide = guide
+        fusedLocationTracker.start(intervalMs = 1500L) { location ->
+            guide.onLocation(GeoPoint(location.latitude, location.longitude))
+        }
+    }
+
+    // 手機朝向每次更新都同步餵給正在進行的轉彎導航，供其重新計算「前後左右」
+    // 與確認使用者是否已完成轉身。
+    LaunchedEffect(compassAzimuth) {
+        activeGuide?.onAzimuth(compassAzimuth)
+    }
+
     // Pulse animation for status indicator
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val alphaAnim by infiniteTransition.animateFloat(
@@ -351,11 +495,31 @@ DisposableEffect(Unit) {
                 alertLogs.removeAt(alertLogs.size - 1)
             }
             val logMessage = if (isUrgent) {
-                "🔴 緊急警告: ${det.direction}有 $name 快速靠近 (優先度: ${String.format("%.1f", priority)})"
-            } else {
-                "⚠️ 危險警告: ${det.direction}有 $name (優先度: ${String.format("%.1f", priority)})"
-            }
+    "緊急警告: ${det.direction}有「$name」快速靠近"
+} else {
+    "危險警告: ${det.direction}有「$name」"
+}
             alertLogs.add(0, AlertLog(System.currentTimeMillis(), logMessage, timeStamp))
+
+            // 只有在導航進行中才把警報寫回後端，讓家屬模式能算出這趟導航的
+            // 「N 次警報」並在詳情地圖上標出位置（見 backend/server.js 的
+            // /api/environment-logs，navigation_id 為選填欄位）。
+            val navigationId = currentNavigationId
+            val userId = deviceProfile?.userId
+            if (navigationId != null && userId != null) {
+                val (alertLat, alertLng) = getCurrentLocation(context)
+                coroutineScope.launch {
+                    reportEnvironmentAlert(
+                        serverUrl = serverUrl,
+                        userId = userId,
+                        navigationId = navigationId,
+                        objectName = name,
+                        description = alertMsg,
+                        latitude = alertLat,
+                        longitude = alertLng
+                    )
+                }
+            }
         }
     }
 
@@ -389,7 +553,7 @@ DisposableEffect(Unit) {
                 },
                 confirmButton = {
                     Button(onClick = {
-                        serverUrl = tempUrl
+                        onServerUrlChange(tempUrl)
                         showSettingsDialog = false
                     }) {
                         Text("確定")
@@ -454,6 +618,14 @@ DisposableEffect(Unit) {
                             modifier = Modifier.size(32.dp)
                         ) {
                             Text("⚙️", fontSize = 16.sp)
+                        }
+                        IconButton(
+                            onClick = onSwitchToFamilyMode,
+                            modifier = Modifier
+                                .size(32.dp)
+                                .semantics { contentDescription = "切換到家屬模式" }
+                        ) {
+                            Text("👪", fontSize = 16.sp)
                         }
                     }
 
@@ -555,6 +727,13 @@ DisposableEffect(Unit) {
                                     )
                                     Button(
                                         onClick = {
+                                            val navigationId = currentNavigationId
+                                            val userId = deviceProfile?.userId
+                                            if (navigationId != null && userId != null) {
+                                                coroutineScope.launch {
+                                                    finishNavigationSession(serverUrl, navigationId, userId, "cancelled")
+                                                }
+                                            }
                                             navigationResult = null
                                             showNavigationTab = false
                                         },
@@ -1238,6 +1417,14 @@ Spacer(modifier = Modifier.height(16.dp))
                             ) {
                                 Text("⚙️", fontSize = 14.sp)
                             }
+                            IconButton(
+                                onClick = onSwitchToFamilyMode,
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .semantics { contentDescription = "切換到家屬模式" }
+                            ) {
+                                Text("👪", fontSize = 14.sp)
+                            }
                         }
 
                         HorizontalDivider(
@@ -1320,6 +1507,13 @@ Spacer(modifier = Modifier.height(16.dp))
                                         )
                                         Button(
                                             onClick = {
+                                                val navigationId = currentNavigationId
+                                                val userId = deviceProfile?.userId
+                                                if (navigationId != null && userId != null) {
+                                                    coroutineScope.launch {
+                                                        finishNavigationSession(serverUrl, navigationId, userId, "cancelled")
+                                                    }
+                                                }
                                                 navigationResult = null
                                                 showNavigationTab = false
                                             },
@@ -1493,15 +1687,26 @@ data class ReverseGeocodeResponse(
 @Serializable
 data class DirectionsRequest(
    val start: String,
-    val destination: String
+    val destination: String,
+    // 選填：帶上裝置配對碼身分的 user_id，後端才會建立 navigation_records，
+    // 讓家屬模式的導航紀錄列表看得到這趟導航（見 data/DeviceIdentity.kt）。
+    val user_id: Int? = null
 )
+
+@Serializable
+data class LatLngDto(val lat: Double, val lng: Double)
 
 @Serializable
 data class DirectionStep(
     val step_order: Int,
     val instruction: String,
     val distance: String,
-    val duration: String
+    val duration: String,
+    // 下列三個欄位為三階段轉彎提示模組新增，供 TurnByTurnGuide 計算距離/方位使用。
+    // 皆為選填，保留 kotlinx.serialization 對舊版後端回應的向下相容性。
+    val start_location: LatLngDto? = null,
+    val end_location: LatLngDto? = null,
+    val maneuver: String? = null
 )
 
 @Serializable
@@ -1512,7 +1717,10 @@ data class DirectionsResponse(
     val distance: String? = null,
     val duration: String? = null,
     val steps: List<DirectionStep>? = null,
-    val message: String? = null
+    val message: String? = null,
+    // 家屬模式新增：後端建立的 navigation_records 主鍵，只有帶了 user_id
+    // 才會有值。用來呼叫 /start、/finish，以及讓警報跟這趟導航關聯起來。
+    val navigation_id: Int? = null
 )
 
 private val json = Json { ignoreUnknownKeys = true }
@@ -1590,9 +1798,15 @@ suspend fun requestReverseGeocode(serverUrl: String, lat: Double, lng: Double): 
     }
 }
 
-suspend fun requestDirections(serverUrl: String, lat: Double, lng: Double, destination: String): DirectionsResponse = withContext(Dispatchers.IO) {
+suspend fun requestDirections(
+    serverUrl: String,
+    lat: Double,
+    lng: Double,
+    destination: String,
+    userId: Int? = null
+): DirectionsResponse = withContext(Dispatchers.IO) {
     val jsonMediaType = "application/json; charset=utf-8".toMediaType()
-    val reqData = DirectionsRequest(start = "$lat,$lng",destination = destination)
+    val reqData = DirectionsRequest(start = "$lat,$lng", destination = destination, user_id = userId)
     val requestBody = json.encodeToString(DirectionsRequest.serializer(), reqData).toRequestBody(jsonMediaType)
     val request = Request.Builder()
         .url("$serverUrl/api/navigation/directions")
@@ -1610,12 +1824,82 @@ suspend fun requestDirections(serverUrl: String, lat: Double, lng: Double, desti
     }
 }
 
+/* =========================================================
+   家屬模式新增：導航開始/結束通知、相機警報回報
+   對應 backend/server.js 既有的 PATCH /api/navigation/:id/start、
+   /finish，以及擴充後可帶 navigation_id 的 POST /api/environment-logs。
+========================================================= */
+
+@Serializable
+private data class StartNavigationRequest(val user_id: Int)
+
+@Serializable
+private data class FinishNavigationRequest(val user_id: Int, val status: String)
+
+@Serializable
+private data class EnvironmentLogRequest(
+    val user_id: Int,
+    val object_name: String,
+    val description: String,
+    val latitude: Double,
+    val longitude: Double,
+    val navigation_id: Int
+)
+
+suspend fun startNavigationSession(serverUrl: String, navigationId: Int, userId: Int) =
+    withContext(Dispatchers.IO) {
+        val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+        val body = json.encodeToString(StartNavigationRequest.serializer(), StartNavigationRequest(userId))
+            .toRequestBody(jsonMediaType)
+        val request = Request.Builder()
+            .url("$serverUrl/api/navigation/$navigationId/start")
+            .patch(body)
+            .build()
+        runCatching { client.newCall(request).execute().close() }.onFailure { it.printStackTrace() }
+    }
+
+suspend fun finishNavigationSession(serverUrl: String, navigationId: Int, userId: Int, status: String) =
+    withContext(Dispatchers.IO) {
+        val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+        val body = json.encodeToString(
+            FinishNavigationRequest.serializer(),
+            FinishNavigationRequest(userId, status)
+        ).toRequestBody(jsonMediaType)
+        val request = Request.Builder()
+            .url("$serverUrl/api/navigation/$navigationId/finish")
+            .patch(body)
+            .build()
+        runCatching { client.newCall(request).execute().close() }.onFailure { it.printStackTrace() }
+    }
+
+suspend fun reportEnvironmentAlert(
+    serverUrl: String,
+    userId: Int,
+    navigationId: Int,
+    objectName: String,
+    description: String,
+    latitude: Double,
+    longitude: Double
+) = withContext(Dispatchers.IO) {
+    val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+    val body = json.encodeToString(
+        EnvironmentLogRequest.serializer(),
+        EnvironmentLogRequest(userId, objectName, description, latitude, longitude, navigationId)
+    ).toRequestBody(jsonMediaType)
+    val request = Request.Builder()
+        .url("$serverUrl/api/environment-logs")
+        .post(body)
+        .build()
+    runCatching { client.newCall(request).execute().close() }.onFailure { it.printStackTrace() }
+}
+
 suspend fun handleVoiceCommand(
     context: Context,
     text: String,
     serverUrl: String,
     lat: Double,
     lng: Double,
+    userId: Int?,
     tts: TextToSpeech?,
     onDirectionsResult: (DirectionsResponse?) -> Unit
 ) {
@@ -1626,26 +1910,16 @@ suspend fun handleVoiceCommand(
         onDirectionsResult(null)
     } else {
         tts?.speak("正在規劃前往 $text 的路線...", TextToSpeech.QUEUE_FLUSH, null, "directions_start")
-        val response = requestDirections(serverUrl, lat, lng, text)
+        val response = requestDirections(serverUrl, lat, lng, text, userId)
         if (response.success) {
             val distanceStr = response.distance ?: ""
             val durationStr = response.duration ?: ""
-            val summary = "規劃成功。全程約 ${distanceStr}，需要 ${durationStr}。指引已顯示在螢幕上。"
+            val summary = "規劃成功。全程約 ${distanceStr}，需要 ${durationStr}，開始導航後會依照您的位置提醒轉彎。"
             tts?.speak(summary, TextToSpeech.QUEUE_ADD, null, "directions_success")
-            
-            val steps = response.steps.orEmpty()
 
-steps.forEach { step ->
-    val instructionText =
-        "第 ${step.step_order} 步，${step.instruction}，距離約 ${step.distance}"
-
-    tts?.speak(
-        instructionText,
-        TextToSpeech.QUEUE_ADD,
-        null,
-        "direction_step_${step.step_order}"
-    )
-}
+            // 注意：這裡不再把所有步驟一次念完。
+            // 逐步的轉彎提示改由 TurnByTurnGuide（三階段轉彎提示模組）
+            // 在使用者實際走到定點時才播報，避免規劃完路線就把整趟路念過一遍。
             onDirectionsResult(response)
         } else {
             val errorMsg = "導航規劃失敗，原因為 ${response.message ?: "未知錯誤"}"

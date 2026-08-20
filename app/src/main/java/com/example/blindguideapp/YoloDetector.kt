@@ -16,6 +16,11 @@ import java.nio.ByteOrder
 class YoloDetector(private val context: Context, private val modelPath: String) {
     private var interpreter: Interpreter? = null
 
+    // 保護 interpreter：避免相機背景執行緒還在呼叫 detect() 的同時，
+    // 另一條執行緒（例如切換到家屬模式時）呼叫 close() 把底層 native
+    // 記憶體釋放掉，兩者同時發生會造成原生層級的記憶體存取錯誤而整個 App 閃退。
+    private val interpreterLock = Any()
+
     private val inputWidth = 640
     private val inputHeight = 640
 
@@ -142,8 +147,8 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
         }
     }
 
-    fun detect(bitmap: Bitmap, rotationDegrees: Int): List<Detection> {
-        val interp = interpreter ?: return emptyList()
+    fun detect(bitmap: Bitmap, rotationDegrees: Int): List<Detection> = synchronized(interpreterLock) {
+        val interp = interpreter ?: return@synchronized emptyList()
 
         // 🎯 關鍵優化：計算正方形尺寸，後續由 ImageProcessor.ResizeWithCropOrPadOp 於 Native 進行置中裁剪，避免額外 Bitmap 記憶體分配
         val width = bitmap.width
@@ -265,7 +270,7 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
         return detections
     }
 
-    fun close() {
+    fun close() = synchronized(interpreterLock) {
         interpreter?.close()
         interpreter = null
     }

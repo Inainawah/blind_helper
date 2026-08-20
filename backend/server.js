@@ -4,6 +4,8 @@ const axios = require("axios");
 require("dotenv").config();
 
 const db = require("./db");
+const familyRouter = require("./family");
+const familyPairingRouter = require("./family_pairing");
 
 const app = express();
 
@@ -839,6 +841,16 @@ app.post(
 
                             end_location:
                                 step.end_location ||
+                                null,
+
+                            /*
+                             * 特殊轉彎圖示（如 turn-left、turn-right、
+                             * roundabout-left、uturn-right）。
+                             * 直行步驟通常不會有此欄位，因此預設 null。
+                             * 提供給 Android 端三階段轉彎提示模組作為輔助判斷。
+                             */
+                            maneuver:
+                                step.maneuver ||
                                 null
                         })
                     )
@@ -870,7 +882,18 @@ app.post(
                                         step.distance,
 
                                     duration:
-                                        step.duration
+                                        step.duration,
+
+                                    /*
+                                     * 保留每個 step 的座標，供家屬模式「查看詳情」
+                                     * 畫出這趟導航的規劃路線地圖使用
+                                     * （見 family_pairing.js 的 navigation-history 詳情 API）。
+                                     */
+                                    start_location:
+                                        step.start_location,
+
+                                    end_location:
+                                        step.end_location
                                 })
                             )
                     });
@@ -1030,7 +1053,8 @@ app.post("/api/environment-logs", async (req, res) => {
             description,
             image_url,
             latitude,
-            longitude
+            longitude,
+            navigation_id
         } = req.body;
 
         // 基本必填欄位檢查
@@ -1097,6 +1121,27 @@ app.post("/api/environment-logs", async (req, res) => {
             });
         }
 
+        /*
+         * navigation_id 為選填，若這次警報是在導航進行中發生，
+         * App 會一併帶上目前的 navigation_id，讓家屬模式的導航紀錄
+         * 能算出「N 次警報」並在詳情地圖上標出警報位置。
+         */
+        const navigationId =
+            navigation_id == null
+                ? null
+                : parsePositiveInteger(navigation_id);
+
+        if (navigation_id != null && navigationId == null) {
+            return res.status(400).json({
+                success: false,
+                error: {
+                    code: "INVALID_NAVIGATION_ID",
+                    message: "navigation_id 必須是大於 0 的整數",
+                    retryable: false
+                }
+            });
+        }
+
         const sql = `
             INSERT INTO object_detections
             (
@@ -1106,9 +1151,10 @@ app.post("/api/environment-logs", async (req, res) => {
                 description,
                 image_url,
                 latitude,
-                longitude
+                longitude,
+                navigation_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `;
 
         const [result] = await db.execute(sql, [
@@ -1125,7 +1171,8 @@ app.post("/api/environment-logs", async (req, res) => {
                 : null,
 
             latNum,
-            lngNum
+            lngNum,
+            navigationId
         ]);
 
         return res.status(201).json({
@@ -3457,6 +3504,22 @@ app.get(
         }
     }
 );
+/* =========================================================
+   11. 家屬地圖儀表板（定位追蹤心跳 / 靜止保底心跳 / 儀表板讀取）
+
+   路由實作於 family.js，此處僅掛載，不更動既有路由與邏輯。
+========================================================= */
+
+app.use("/api", familyRouter);
+
+/* =========================================================
+   12. App 內建家屬模式（配對碼 / 導航紀錄列表 / 單趟詳情）
+
+   路由實作於 family_pairing.js，此處僅掛載，不更動既有路由與邏輯。
+========================================================= */
+
+app.use("/api", familyPairingRouter);
+
 /* =========================================================
    找不到 API
 ========================================================= */

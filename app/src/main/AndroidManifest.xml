@@ -6,6 +6,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-feature android:name="android.hardware.camera" />
 
     <application
@@ -17,6 +18,17 @@
         android:windowSoftInputMode="adjustResize"
         android:usesCleartextTraffic="true"
         android:theme="@style/Theme.BlindGuideApp">
+
+        <!--
+             家屬模式「查看詳情」路線地圖用的 Maps SDK for Android 金鑰。
+             值來自 local.properties 的 MAPS_API_KEY（見 app/build.gradle.kts），
+             不會被提交進 git；沒有設定時這裡會是空字串，地圖會顯示空白圖磚，
+             不影響其他既有功能。
+        -->
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="${MAPS_API_KEY}" />
+
         <activity
         android:screenOrientation="landscape"
             android:name=".MainActivity"
