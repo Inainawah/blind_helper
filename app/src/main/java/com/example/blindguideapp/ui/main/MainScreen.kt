@@ -449,12 +449,6 @@ DisposableEffect(Unit) {
                         ) {
                             Text("導航指引", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
-                        IconButton(
-                            onClick = { showSettingsDialog = true },
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Text("⚙️", fontSize = 16.sp)
-                        }
                     }
 
                     HorizontalDivider(color = Color(0x1AFFFFFF), thickness = 1.dp)
@@ -1232,12 +1226,7 @@ Spacer(modifier = Modifier.height(16.dp))
                             ) {
                                 Text("導航指引", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                             }
-                            IconButton(
-                                onClick = { showSettingsDialog = true },
-                                modifier = Modifier.size(28.dp)
-                            ) {
-                                Text("⚙️", fontSize = 14.sp)
-                            }
+                            
                         }
 
                         HorizontalDivider(
