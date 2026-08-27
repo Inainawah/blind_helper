@@ -110,12 +110,17 @@ class TurnByTurnGuide(
 
             distanceToTurn <= PREPARE_M && stage == Stage.ANNOUNCED_PRE -> {
                 stage = Stage.ANNOUNCED_PREPARE
-                speak("5 公尺後$phrase，請用導盲杖確認$phrase 轉角或導盲磚", false)
+                // 語音限制：單次播報不超過 15 字，即使方向詞是最長的
+                // 「向左前方走／向右前方走」（5 字）也要留在字數限制內。
+                // flush 一律用 true：導航語音要絕對優先，不能被警報排隊卡住
+                // （警報本身已經有獨立的「不打斷導航」規則，這裡改成導航
+                // 主動清開警報佇列，兩邊互相配合才能保證導航一定準時講）。
+                speak("5公尺後$phrase，留意路面", true)
             }
 
             distanceToTurn <= PRE_M && stage == Stage.NONE -> {
                 stage = Stage.ANNOUNCED_PRE
-                speak("前方 15 公尺處準備$phrase", false)
+                speak("前方15公尺請準備$phrase", true)
             }
         }
 
@@ -142,7 +147,7 @@ class TurnByTurnGuide(
         val routeBearing = bearingDegrees(step.start, step.end)
         val delta = angleDiffTo(lastAzimuth, routeBearing)
         val phrase = DirectionTranslator.relativeDirectionPhrase(delta)
-        speak("請先$phrase，開始這趟導航", false)
+        speak("請先$phrase，開始這趟導航", true)
     }
 
     private fun checkTurnConfirmation() {
@@ -192,12 +197,12 @@ class TurnByTurnGuide(
 
             distanceToDestination <= PREPARE_M && stage == Stage.ANNOUNCED_PRE -> {
                 stage = Stage.ANNOUNCED_PREPARE
-                speak("即將抵達目的地，目的地在您的$phrase，請放慢腳步", false)
+                speak("即將抵達目的地，目的地在您的$phrase，請放慢腳步", true)
             }
 
             distanceToDestination <= PRE_M && stage == Stage.NONE -> {
                 stage = Stage.ANNOUNCED_PRE
-                speak("前方 15 公尺處即為目的地，在您的$phrase", false)
+                speak("前方 15 公尺處即為目的地，在您的$phrase", true)
             }
         }
     }
