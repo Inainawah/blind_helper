@@ -61,6 +61,9 @@ class TurnByTurnGuide(
     private var distanceAtTriggerM = 0.0
     private var triggeredAtMs = 0L
 
+    // 記錄本步驟中偵測到的最小距離，作為通用避讓/步進機制（防止因定位誤差漏掉觸發點而卡住）。
+    private var minDistanceObserved = Double.MAX_VALUE
+
     var isFinished = false
         private set
 
@@ -84,6 +87,12 @@ class TurnByTurnGuide(
 
         val step = steps[currentIndex]
         val distanceToTurn = distanceMeters(current, step.end)
+
+        // 更新此步驟中的最小距離
+        if (distanceToTurn < minDistanceObserved) {
+            minDistanceObserved = distanceToTurn
+        }
+
         val isLastStep = currentIndex == steps.size - 1
 
         if (isLastStep) {
@@ -122,6 +131,16 @@ class TurnByTurnGuide(
                 stage = Stage.ANNOUNCED_PRE
                 speak("前方15公尺請準備$phrase", true)
             }
+        }
+
+        // 備援機制一（通用）：如果使用者已進入 15 公尺範圍內，且當下距離比這段路程中達到的最小距離還遠 4 公尺以上，
+        // 代表使用者已經走過或繞過該轉向點，為了防定位誤差漏掉 3m 的 TRIGGERED 判定而卡住，此時應直接進入下一步。
+        val hasMovedPastTurnGeneral = minDistanceObserved <= PRE_M &&
+                (distanceToTurn - minDistanceObserved >= MOVED_PAST_TURN_M)
+
+        if (hasMovedPastTurnGeneral) {
+            advanceStep()
+            return
         }
 
         if (stage == Stage.TRIGGERED) {
@@ -169,6 +188,7 @@ class TurnByTurnGuide(
         turnConfirmStableSinceMs = 0L
         currentIndex++
         stage = Stage.NONE
+        minDistanceObserved = Double.MAX_VALUE
 
         if (currentIndex >= steps.size) {
             isFinished = true
