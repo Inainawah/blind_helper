@@ -20,6 +20,7 @@ const express = require("express");
 const crypto = require("crypto");
 
 const db = require("./db");
+const { computeStayPoints } = require("./geo");
 
 const router = express.Router();
 
@@ -383,6 +384,19 @@ router.get("/family/navigation-history/:navigation_id", async (req, res) => {
             [navigationId]
         );
 
+        // 這趟導航進行中，App 每隔一段時間回報的實際座標（見下方
+        // POST /api/navigation/:navigation_id/location-ping），拿來離線算出
+        // 「在同一個地方停留超過 5 分鐘」的停留點，不需要額外的即時狀態。
+        const [locationRows] = await db.execute(
+            `SELECT latitude, longitude, recorded_at
+             FROM location_logs
+             WHERE navigation_id = ?
+             ORDER BY recorded_at ASC`,
+            [navigationId]
+        );
+
+        const stayPoints = computeStayPoints(locationRows);
+
         return res.status(200).json({
             success: true,
             navigation: {
@@ -412,6 +426,14 @@ router.get("/family/navigation-history/:navigation_id", async (req, res) => {
                 latitude: row.latitude == null ? null : Number(row.latitude),
                 longitude: row.longitude == null ? null : Number(row.longitude),
                 occurred_at: row.created_at
+            })),
+            stay_points: stayPoints.map((stay, index) => ({
+                stay_point_id: index + 1,
+                latitude: stay.latitude,
+                longitude: stay.longitude,
+                arrived_at: stay.arrived_at,
+                left_at: stay.left_at,
+                duration_seconds: stay.duration_seconds
             }))
         });
     } catch (error) {
@@ -421,6 +443,91 @@ router.get("/family/navigation-history/:navigation_id", async (req, res) => {
             error: {
                 code: "NAVIGATION_DETAIL_FAILED",
                 message: "查詢導航詳情失敗",
+                retryable: false
+            }
+        });
+    }
+});
+
+/* =========================================================
+   5. 導航進行中的位置回報（供事後算出停留點）
+
+   App 在導航進行中，每隔約 20 秒呼叫一次（見 MainScreen.kt 的
+   reportNavigationLocation()），單純把座標存起來，不在這裡做任何
+   即時判斷——停留點是在「查看詳情」當下才一次算出來（見上方
+   GET /api/family/navigation-history/:navigation_id）。
+========================================================= */
+
+router.post("/navigation/:navigation_id/location-ping", async (req, res) => {
+    try {
+        const navigationId = parsePositiveInteger(req.params.navigation_id);
+        const userId = parsePositiveInteger(req.body.user_id);
+        const latitude = Number(req.body.latitude);
+        const longitude = Number(req.body.longitude);
+
+        if (
+            navigationId == null ||
+            userId == null ||
+            !Number.isFinite(latitude) ||
+            latitude < -90 ||
+            latitude > 90 ||
+            !Number.isFinite(longitude) ||
+            longitude < -180 ||
+            longitude > 180
+        ) {
+            return res.status(400).json({
+                success: false,
+                error: {
+                    code: "INVALID_REQUEST",
+                    message: "navigation_id、user_id、latitude、longitude 格式不正確",
+                    retryable: false
+                }
+            });
+        }
+
+        const recordedAt = req.body.recorded_at ? new Date(req.body.recorded_at) : new Date();
+        if (Number.isNaN(recordedAt.getTime())) {
+            return res.status(400).json({
+                success: false,
+                error: {
+                    code: "INVALID_TIMESTAMP",
+                    message: "recorded_at 格式不正確",
+                    retryable: false
+                }
+            });
+        }
+
+        // 只確認這趟導航真的屬於這個 user_id，避免任意寫入別人的紀錄。
+        const [navRows] = await db.execute(
+            `SELECT navigation_id FROM navigation_records WHERE navigation_id = ? AND user_id = ?`,
+            [navigationId, userId]
+        );
+
+        if (navRows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: {
+                    code: "NAVIGATION_NOT_FOUND",
+                    message: "找不到此導航紀錄",
+                    retryable: false
+                }
+            });
+        }
+
+        await db.execute(
+            `INSERT INTO location_logs (user_id, navigation_id, latitude, longitude, recorded_at)
+             VALUES (?, ?, ?, ?, ?)`,
+            [userId, navigationId, latitude, longitude, recordedAt]
+        );
+
+        return res.status(201).json({ success: true });
+    } catch (error) {
+        console.error("Navigation location ping failed:", error);
+        return res.status(500).json({
+            success: false,
+            error: {
+                code: "LOCATION_PING_FAILED",
+                message: "位置回報寫入失敗",
                 retryable: false
             }
         });

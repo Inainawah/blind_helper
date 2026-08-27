@@ -8,6 +8,7 @@ import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.hardware.camera2.CaptureRequest
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.media.AudioAttributes
 import android.content.Intent
 import android.annotation.SuppressLint
@@ -88,6 +89,12 @@ import java.util.concurrent.Executors
 
 data class AlertLog(val id: Long, val message: String, val timestamp: String)
 
+/** 尚未成功講完的導航語音內容，供警報打斷後補講、並追蹤已被打斷幾次。 */
+private data class PendingNavigationSpeech(val text: String, val interruptedCount: Int)
+
+/** 導航語音連續被打斷達到這個次數，就改用強制插播，確保最終一定講得出來。 */
+private const val NAVIGATION_SPEECH_FORCE_INTERRUPT_THRESHOLD = 2
+
 /** 盲人模式（既有的相機/導航 UI）／家屬模式（新增）。 */
 private enum class AppMode { BLIND, FAMILY }
 
@@ -163,6 +170,13 @@ fun MainScreen(
                         }
                     }
                 },
+                onRetryRegistration = {
+                    identityCoroutineScope.launch {
+                        if (deviceProfile == null) {
+                            deviceProfile = deviceIdentityManager.ensureRegistered(serverUrl)
+                        }
+                    }
+                },
                 onSwitchToBlindMode = { appMode = AppMode.BLIND },
                 modifier = modifier
             )
@@ -191,6 +205,18 @@ fun CameraDetectionLayout(
     var tts by remember { mutableStateOf<TextToSpeech?>(null) }
     var ttsInitialized by remember { mutableStateOf(false) }
 
+    // 記錄「導航轉彎提示」目前正在播放/排隊的內容（utteranceId -> 內容 + 已被打斷次數）。
+    // 相機危險警報有時候會用「立刻打斷」的方式插播，如果剛好打斷到導航語音，
+    // 靠這份記錄在警報講完後把被打斷的那句導航提示補講一次，避免使用者漏聽轉彎資訊。
+    // 在路口這種警報密集的地方，同一句話可能被連續打斷好幾次，所以還要記錄
+    // 「已經被打斷幾次」，超過門檻就讓導航語音改用強制插播，確保最終一定講得完。
+    val navigationUtteranceRegistry =
+        remember { java.util.concurrent.ConcurrentHashMap<String, PendingNavigationSpeech>() }
+
+    // 導航路徑語音正在講的時候是 true；期間相機警報一律不打斷它，改成排隊等它
+    // 講完再放，確保路徑指示一定能完整講完。
+    val isNavigationSpeaking = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+
     LaunchedEffect(ttsInitialized) {
         if (ttsInitialized) {
             tts?.speak(
@@ -203,18 +229,65 @@ fun CameraDetectionLayout(
     }
 
     DisposableEffect(Unit) {
-        val ttsEngine = TextToSpeech(context) { status ->
+        lateinit var ttsEngine: TextToSpeech
+        ttsEngine = TextToSpeech(context) { status ->
+            // 這個 callback 才是「語音引擎真正綁定完成」的時間點，
+            // 一定要等這裡才能設定語言/語速/音訊屬性，太早設定會失敗
+            // （之前就是因為在這之前就設定，導致「設成中文」這個動作沒生效，
+            // 語音引擎停留在預設語言，講中文內容時完全沒有聲音）。
             if (status == TextToSpeech.SUCCESS) {
+                val audioAttributes = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+                ttsEngine.setAudioAttributes(audioAttributes)
+                ttsEngine.setSpeechRate(1.3f)
+                ttsEngine.language = Locale.CHINESE
                 ttsInitialized = true
             }
         }
-        val audioAttributes = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-            .build()
-        ttsEngine.setAudioAttributes(audioAttributes)
-        ttsEngine.setSpeechRate(1.3f)
-        ttsEngine.language = Locale.CHINESE
+
+        ttsEngine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {
+                if (utteranceId != null && utteranceId.startsWith("turn_guide_")) {
+                    isNavigationSpeaking.set(true)
+                }
+            }
+
+            override fun onDone(utteranceId: String?) {
+                if (utteranceId != null) {
+                    navigationUtteranceRegistry.remove(utteranceId)
+                    if (utteranceId.startsWith("turn_guide_")) isNavigationSpeaking.set(false)
+                }
+            }
+
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) {
+                if (utteranceId != null) {
+                    navigationUtteranceRegistry.remove(utteranceId)
+                    if (utteranceId.startsWith("turn_guide_")) isNavigationSpeaking.set(false)
+                }
+            }
+
+            override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                // 導航語音被警報插播打斷（interrupted = true）：把同一句話重新排回去播放，
+                // 不會就這樣消失不見。如果連續被打斷好幾次（路口警報密集的情況），
+                // 就改用強制插播，確保使用者最終一定聽得到轉彎指示。
+                if (!interrupted || utteranceId == null) return
+                val pending = navigationUtteranceRegistry.remove(utteranceId) ?: return
+                val interruptedCount = pending.interruptedCount + 1
+                val retryId = "turn_guide_retry_${System.currentTimeMillis()}"
+                navigationUtteranceRegistry[retryId] = PendingNavigationSpeech(pending.text, interruptedCount)
+                val queueMode =
+                    if (interruptedCount >= NAVIGATION_SPEECH_FORCE_INTERRUPT_THRESHOLD) {
+                        TextToSpeech.QUEUE_FLUSH
+                    } else {
+                        TextToSpeech.QUEUE_ADD
+                    }
+                ttsEngine.speak(pending.text, queueMode, null, retryId)
+            }
+        })
+
         tts = ttsEngine
 
         onDispose {
@@ -261,7 +334,6 @@ fun CameraDetectionLayout(
     var recognizedText by remember { mutableStateOf("尚未收到語音指令") }
     var navigationResult by remember { mutableStateOf<DirectionsResponse?>(null) }
     var showNavigationTab by remember { mutableStateOf(false) }
-    var showSettingsDialog by remember { mutableStateOf(false) }
     // 目前這趟導航在後端的 navigation_id，供相機警報寫回 /api/environment-logs
     // 以及開始/結束時通知 /api/navigation/:id/start、/finish 使用（見下方 LaunchedEffect）。
     var currentNavigationId by remember { mutableStateOf<Int?>(null) }
@@ -384,11 +456,14 @@ DisposableEffect(Unit) {
         val guide = TurnByTurnGuide(
             steps = guideSteps,
             speak = { text, flush ->
+                val utteranceId = "turn_guide_${System.currentTimeMillis()}"
+                // 記錄下來，如果這句話被相機警報中途打斷，才有辦法在警報講完後補講一次。
+                navigationUtteranceRegistry[utteranceId] = PendingNavigationSpeech(text, interruptedCount = 0)
                 tts?.speak(
                     text,
                     if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
                     null,
-                    "turn_guide_${System.currentTimeMillis()}"
+                    utteranceId
                 )
             },
             vibrateShort = { guidanceVibrator.shortDoubleBuzz() },
@@ -401,8 +476,23 @@ DisposableEffect(Unit) {
             }
         )
         activeGuide = guide
+
+        // 每隔一段時間（而不是每 1.5 秒都送）把座標回報給後端，
+        // 讓家屬模式「查看詳情」能事後算出「在同一個地方停留超過 5 分鐘」
+        // 的停留點，不用即時判斷、不用額外狀態。
+        var lastLocationReportMs = 0L
         fusedLocationTracker.start(intervalMs = 1500L) { location ->
             guide.onLocation(GeoPoint(location.latitude, location.longitude))
+
+            if (navigationId != null && userId != null) {
+                val now = System.currentTimeMillis()
+                if (now - lastLocationReportMs >= LOCATION_REPORT_INTERVAL_MS) {
+                    lastLocationReportMs = now
+                    coroutineScope.launch {
+                        reportNavigationLocation(serverUrl, navigationId, userId, location.latitude, location.longitude)
+                    }
+                }
+            }
         }
     }
 
@@ -472,8 +562,18 @@ DisposableEffect(Unit) {
             lastSpokenClassId = det.classId
             lastSpokenPriority = priority
 
-            // Use QUEUE_FLUSH to preempt immediately
-            if (isUrgent) {
+            // 導航路徑語音正在講的時候，不管警報是不是緊急等級，一律不打斷它，
+            // 排隊等它講完再放。其餘（緊急與否、冷卻時間、一般警報要不要排隊）
+            // 維持原本邏輯不變。
+            if (isNavigationSpeaking.get()) {
+    tts?.speak(
+        alertMsg,
+        TextToSpeech.QUEUE_ADD,
+        null,
+        "queued_alert_$currentTime"
+    )
+} else if (isUrgent) {
+    // Use QUEUE_FLUSH to preempt immediately
     tts?.speak(
         alertMsg,
         TextToSpeech.QUEUE_FLUSH,
@@ -534,39 +634,6 @@ DisposableEffect(Unit) {
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        if (showSettingsDialog) {
-            var tempUrl by remember { mutableStateOf(serverUrl) }
-            AlertDialog(
-                onDismissRequest = { showSettingsDialog = false },
-                title = { Text("設定伺服器網址") },
-                text = {
-                    Column {
-                        Text("請輸入後端 API 伺服器網址：", fontSize = 14.sp)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        TextField(
-                            value = tempUrl,
-                            onValueChange = { tempUrl = it },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                },
-                confirmButton = {
-                    Button(onClick = {
-                        onServerUrlChange(tempUrl)
-                        showSettingsDialog = false
-                    }) {
-                        Text("確定")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showSettingsDialog = false }) {
-                        Text("取消")
-                    }
-                }
-            )
-        }
-
         if (isLandscape) {
             // Landscape Layout: Camera square centered with black masks on left and right sides
             Row(
@@ -612,12 +679,6 @@ DisposableEffect(Unit) {
                             contentPadding = PaddingValues(0.dp)
                         ) {
                             Text("導航指引", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
-                        IconButton(
-                            onClick = { showSettingsDialog = true },
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Text("⚙️", fontSize = 16.sp)
                         }
                         IconButton(
                             onClick = onSwitchToFamilyMode,
@@ -1412,12 +1473,6 @@ Spacer(modifier = Modifier.height(16.dp))
                                 Text("導航指引", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                             }
                             IconButton(
-                                onClick = { showSettingsDialog = true },
-                                modifier = Modifier.size(28.dp)
-                            ) {
-                                Text("⚙️", fontSize = 14.sp)
-                            }
-                            IconButton(
                                 onClick = onSwitchToFamilyMode,
                                 modifier = Modifier
                                     .size(28.dp)
@@ -1773,6 +1828,27 @@ fun getCurrentLocation(context: Context): Pair<Double, Double> {
     }
 }
 
+@Serializable
+data class ApiErrorDetail(val code: String? = null, val message: String? = null, val retryable: Boolean? = null)
+
+@Serializable
+data class ApiErrorEnvelope(val success: Boolean = false, val error: ApiErrorDetail? = null)
+
+/**
+ * 後端失敗時（HTTP 4xx/5xx）會回傳 { success:false, error:{ code, message, retryable } }，
+ * 這裡把裡面真正有意義的中文訊息取出來，而不是只念出無意義的 HTTP 狀態碼數字，
+ * 對視障使用者才聽得懂發生了什麼事、該怎麼辦。
+ */
+fun extractApiErrorMessage(bodyString: String?, httpCode: Int): String {
+    if (bodyString != null) {
+        val parsedMessage = runCatching {
+            json.decodeFromString(ApiErrorEnvelope.serializer(), bodyString).error?.message
+        }.getOrNull()
+        if (!parsedMessage.isNullOrBlank()) return parsedMessage
+    }
+    return "伺服器錯誤 (代碼 $httpCode)"
+}
+
 suspend fun requestReverseGeocode(serverUrl: String, lat: Double, lng: Double): String = withContext(Dispatchers.IO) {
     val jsonMediaType = "application/json; charset=utf-8".toMediaType()
     val reqData = ReverseGeocodeRequest(lat, lng)
@@ -1783,8 +1859,9 @@ suspend fun requestReverseGeocode(serverUrl: String, lat: Double, lng: Double): 
         .build()
     try {
         client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) return@withContext "伺服器錯誤: ${response.code}"
-            val bodyString = response.body?.string() ?: return@withContext "回應為空"
+            val bodyString = response.body?.string()
+            if (!response.isSuccessful) return@withContext extractApiErrorMessage(bodyString, response.code)
+            if (bodyString == null) return@withContext "回應為空"
             val res = json.decodeFromString(ReverseGeocodeResponse.serializer(), bodyString)
             if (res.success) {
                 res.address ?: "未取得地址"
@@ -1814,8 +1891,11 @@ suspend fun requestDirections(
         .build()
     try {
         client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) return@withContext DirectionsResponse(false, message = "伺服器錯誤: ${response.code}")
-            val bodyString = response.body?.string() ?: return@withContext DirectionsResponse(false, message = "回應為空")
+            val bodyString = response.body?.string()
+            if (!response.isSuccessful) {
+                return@withContext DirectionsResponse(false, message = extractApiErrorMessage(bodyString, response.code))
+            }
+            if (bodyString == null) return@withContext DirectionsResponse(false, message = "回應為空")
             json.decodeFromString(DirectionsResponse.serializer(), bodyString)
         }
     } catch (e: Exception) {
@@ -1846,6 +1926,13 @@ private data class EnvironmentLogRequest(
     val navigation_id: Int
 )
 
+@Serializable
+private data class LocationPingRequest(val user_id: Int, val latitude: Double, val longitude: Double)
+
+// 導航進行中回報座標的間隔。設太短會一直打後端，設太長會讓停留點判斷不準；
+// 20 秒可以在 5 分鐘的停留門檻內取得約 15 個樣本，足夠判斷。
+private const val LOCATION_REPORT_INTERVAL_MS = 20_000L
+
 suspend fun startNavigationSession(serverUrl: String, navigationId: Int, userId: Int) =
     withContext(Dispatchers.IO) {
         val jsonMediaType = "application/json; charset=utf-8".toMediaType()
@@ -1871,6 +1958,29 @@ suspend fun finishNavigationSession(serverUrl: String, navigationId: Int, userId
             .build()
         runCatching { client.newCall(request).execute().close() }.onFailure { it.printStackTrace() }
     }
+
+/**
+ * 導航進行中定期回報目前座標，供家屬模式「查看詳情」事後算出停留點
+ * （見 backend/family_pairing.js 的 /api/navigation/:id/location-ping）。
+ */
+suspend fun reportNavigationLocation(
+    serverUrl: String,
+    navigationId: Int,
+    userId: Int,
+    latitude: Double,
+    longitude: Double
+) = withContext(Dispatchers.IO) {
+    val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+    val body = json.encodeToString(
+        LocationPingRequest.serializer(),
+        LocationPingRequest(userId, latitude, longitude)
+    ).toRequestBody(jsonMediaType)
+    val request = Request.Builder()
+        .url("$serverUrl/api/navigation/$navigationId/location-ping")
+        .post(body)
+        .build()
+    runCatching { client.newCall(request).execute().close() }.onFailure { it.printStackTrace() }
+}
 
 suspend fun reportEnvironmentAlert(
     serverUrl: String,

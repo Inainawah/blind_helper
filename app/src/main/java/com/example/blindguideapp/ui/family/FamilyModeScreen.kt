@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.blindguideapp.data.DeviceProfile
 import com.google.android.gms.maps.CameraUpdateFactory
+import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.LatLngBounds
@@ -32,14 +33,20 @@ import java.util.Locale
 import java.util.TimeZone
 
 /**
- * App 內建家屬模式主畫面：頂部配對碼 + 導航紀錄列表，
+ * App 內建家屬模式主畫面：頂部配對碼 + 查詢輸入框 + 導航紀錄列表，
  * 點「查看詳情」開啟 [NavigationDetailOverlay]（路線地圖 + 警報標記）。
+ *
+ * 「本機配對碼」跟「目前查詢的配對碼」是分開的兩件事：
+ *   - 本機配對碼：這台裝置自己的碼（給家屬念出來/輸入用）。
+ *   - 查詢配對碼：預設等於本機配對碼（自己查自己），但可以手動改輸入
+ *     別人的配對碼，改看別人（例如視障者那台裝置）的導航紀錄。
  */
 @Composable
 fun FamilyModeScreen(
     serverUrl: String,
     deviceProfile: DeviceProfile?,
     onRegenerateCode: () -> Unit,
+    onRetryRegistration: () -> Unit,
     onSwitchToBlindMode: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -48,17 +55,35 @@ fun FamilyModeScreen(
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var selectedNavigationId by remember { mutableStateOf<Int?>(null) }
 
-    val pairingCode = deviceProfile?.pairingCode
+    var queryInput by remember { mutableStateOf("") }
+    var activePairingCode by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(pairingCode) {
-        if (pairingCode.isNullOrBlank()) return@LaunchedEffect
+    // 裝置註冊（拿到本機配對碼）如果還沒成功，進到家屬模式時自動再試一次，
+    // 不用等使用者自己重開 App。
+    LaunchedEffect(deviceProfile) {
+        if (deviceProfile == null) onRetryRegistration()
+    }
+
+    // 拿到本機配對碼後，預設拿來查詢自己；使用者之後可以手動改輸入框查別人。
+    LaunchedEffect(deviceProfile?.pairingCode) {
+        val ownCode = deviceProfile?.pairingCode
+        if (ownCode != null && activePairingCode == null) {
+            queryInput = ownCode
+            activePairingCode = ownCode
+        }
+    }
+
+    LaunchedEffect(activePairingCode) {
+        val code = activePairingCode
+        if (code.isNullOrBlank()) return@LaunchedEffect
         isLoading = true
         errorMessage = null
-        val response = fetchNavigationHistory(serverUrl, pairingCode)
+        val response = fetchNavigationHistory(serverUrl, code)
         isLoading = false
         if (response.success) {
             records = response.records.orEmpty()
         } else {
+            records = emptyList()
             errorMessage = response.message ?: "查詢導航紀錄失敗"
         }
     }
@@ -71,18 +96,27 @@ fun FamilyModeScreen(
     ) {
         Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
             FamilyModeHeader(
-                pairingCode = pairingCode,
+                pairingCode = deviceProfile?.pairingCode,
                 onRegenerateCode = onRegenerateCode,
+                onRetryRegistration = onRetryRegistration,
                 onSwitchToBlindMode = onSwitchToBlindMode
             )
 
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(16.dp))
+
+            PairingCodeQueryRow(
+                queryInput = queryInput,
+                onQueryInputChange = { queryInput = it.filter(Char::isDigit).take(6) },
+                onSubmit = { if (queryInput.length == 6) activePairingCode = queryInput }
+            )
+
+            Spacer(Modifier.height(16.dp))
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("📋", fontSize = 16.sp)
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    "導航紀錄列表 (配對碼: ${pairingCode ?: "------"})",
+                    "導航紀錄列表 (配對碼: ${activePairingCode ?: "------"})",
                     color = Color.White,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold
@@ -92,6 +126,7 @@ fun FamilyModeScreen(
             Spacer(Modifier.height(12.dp))
 
             when {
+                activePairingCode == null -> CenteredHint("請先輸入 6 碼配對碼查詢")
                 isLoading -> CenteredHint("載入中…")
                 errorMessage != null -> CenteredHint(errorMessage ?: "", isError = true)
                 records.isEmpty() -> CenteredHint("尚無導航紀錄")
@@ -107,13 +142,47 @@ fun FamilyModeScreen(
         }
 
         val navigationId = selectedNavigationId
-        if (navigationId != null && pairingCode != null) {
+        val detailPairingCode = activePairingCode
+        if (navigationId != null && detailPairingCode != null) {
             NavigationDetailOverlay(
                 serverUrl = serverUrl,
                 navigationId = navigationId,
-                pairingCode = pairingCode,
+                pairingCode = detailPairingCode,
                 onDismiss = { selectedNavigationId = null }
             )
+        }
+    }
+}
+
+@Composable
+private fun PairingCodeQueryRow(
+    queryInput: String,
+    onQueryInputChange: (String) -> Unit,
+    onSubmit: () -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("查詢配對碼：", color = Color.White, fontSize = 14.sp)
+        Spacer(Modifier.width(8.dp))
+        TextField(
+            value = queryInput,
+            onValueChange = onQueryInputChange,
+            singleLine = true,
+            placeholder = { Text("輸入 6 碼配對碼") },
+            modifier = Modifier.width(160.dp),
+            colors = TextFieldDefaults.colors(
+                focusedContainerColor = Color(0xFF1B2333),
+                unfocusedContainerColor = Color(0xFF1B2333),
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White
+            )
+        )
+        Spacer(Modifier.width(8.dp))
+        Button(
+            onClick = onSubmit,
+            enabled = queryInput.length == 6,
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4DD0E1))
+        ) {
+            Text("查詢", color = Color.Black, fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -122,6 +191,7 @@ fun FamilyModeScreen(
 private fun FamilyModeHeader(
     pairingCode: String?,
     onRegenerateCode: () -> Unit,
+    onRetryRegistration: () -> Unit,
     onSwitchToBlindMode: () -> Unit
 ) {
     Row(
@@ -142,19 +212,23 @@ private fun FamilyModeHeader(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "盲人配對碼: 🔑 ${pairingCode ?: "------"}",
+                    "本機配對碼: 🔑 ${pairingCode ?: "------"}",
                     color = Color(0xFF9AD1FF),
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
-            Spacer(Modifier.width(8.dp))
-            OutlinedButton(
-                onClick = onRegenerateCode,
-                shape = RoundedCornerShape(20.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
-            ) {
-                Text("修改配對碼", fontSize = 13.sp)
+            if (pairingCode == null) {
+                Spacer(Modifier.width(8.dp))
+                // 裝置註冊還沒成功（例如網路不穩），提供手動重試。
+                // 「修改配對碼」不需要用到，已移除；這裡只保留註冊失敗時的重試按鈕。
+                OutlinedButton(
+                    onClick = onRetryRegistration,
+                    shape = RoundedCornerShape(20.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
+                ) {
+                    Text("重新取得配對碼", fontSize = 13.sp)
+                }
             }
         }
 
@@ -267,48 +341,91 @@ private fun NavigationDetailOverlay(
                     val nav = response.navigation
                     val path = response.path.orEmpty()
                     val alerts = response.alerts.orEmpty()
+                    val stayPoints = response.stay_points.orEmpty()
 
-                    Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                        Text("起點: ${nav?.start_address ?: "未知"}", color = Color.LightGray, fontSize = 13.sp)
-                        Text("終點: ${nav?.end_address ?: "未知"}", color = Color.LightGray, fontSize = 13.sp)
-                        Text(
-                            "時長: ${formatDurationMinutes(nav?.duration_seconds)}　警報: ${alerts.size} 次",
-                            color = Color(0xFF4DD0E1),
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    Spacer(Modifier.height(12.dp))
-
-                    Box(
+                    // 橫向裝置畫面較寬，改成左右兩欄：左邊文字資訊、右邊地圖佔滿剩餘高度，
+                    // 比原本「文字在上、地圖在下」更能善用橫向空間。
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .weight(1f)
-                            .padding(horizontal = 16.dp)
-                            .clip(RoundedCornerShape(16.dp))
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        NavigationRouteMap(path = path, alerts = alerts)
-                    }
-
-                    if (alerts.isNotEmpty()) {
-                        LazyColumn(
+                        Column(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 160.dp)
-                                .padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                                .weight(1f)
+                                .fillMaxHeight()
                         ) {
-                            items(alerts, key = { it.detection_id }) { alert ->
+                            Text(
+                                "起點: ${nav?.start_address ?: "未知"}",
+                                color = Color.LightGray,
+                                fontSize = 13.sp
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "終點: ${nav?.end_address ?: "未知"}",
+                                color = Color.LightGray,
+                                fontSize = 13.sp
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "時長: ${formatDurationMinutes(nav?.duration_seconds)}",
+                                color = Color(0xFF4DD0E1),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "警報: ${alerts.size} 次",
+                                color = Color(0xFF4DD0E1),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            if (stayPoints.isNotEmpty()) {
+                                Spacer(Modifier.height(14.dp))
                                 Text(
-                                    "${formatDateTime(alert.occurred_at)}　${alert.description ?: alert.object_name}",
-                                    color = Color(0xFFFF8A80),
-                                    fontSize = 12.sp
+                                    "🕒 停留點（超過 5 分鐘）",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
                                 )
+                                Spacer(Modifier.height(6.dp))
+                                LazyColumn(
+                                    modifier = Modifier.heightIn(max = 160.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    items(stayPoints, key = { it.stay_point_id }) { stay ->
+                                        Column {
+                                            Text(
+                                                "停留了 ${formatDurationMinutes(stay.duration_seconds)}" +
+                                                    "（${formatTimeOnly(stay.arrived_at)} 抵達）",
+                                                color = Color(0xFFFFD54F),
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Text(
+                                                "座標：${formatCoordinate(stay.latitude)}, ${formatCoordinate(stay.longitude)}",
+                                                color = Color.White.copy(alpha = 0.6f),
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                    }
+                                }
                             }
+
+                            Spacer(Modifier.weight(1f))
                         }
-                    } else {
-                        Spacer(Modifier.height(16.dp))
+
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .clip(RoundedCornerShape(16.dp))
+                        ) {
+                            NavigationRouteMap(path = path, stayPoints = stayPoints)
+                        }
                     }
                 }
             }
@@ -322,18 +439,27 @@ private fun NavigationDetailOverlay(
  * 但 Polyline/Marker 邏輯不受影響，設定好金鑰後即可正常顯示。
  */
 @Composable
-private fun NavigationRouteMap(path: List<LatLngDto2>, alerts: List<AlertDto>) {
+private fun NavigationRouteMap(
+    path: List<LatLngDto2>,
+    stayPoints: List<StayPointDto> = emptyList()
+) {
     val pathLatLngs = remember(path) { path.map { LatLng(it.lat, it.lng) } }
-    val alertPoints = remember(alerts) {
-        alerts.mapNotNull { alert ->
-            val lat = alert.latitude
-            val lng = alert.longitude
-            if (lat != null && lng != null) alert to LatLng(lat, lng) else null
-        }
+    val stayMarkerPoints = remember(stayPoints) {
+        stayPoints.map { it to LatLng(it.latitude, it.longitude) }
     }
 
     val cameraPositionState = rememberCameraPositionState()
     var isMapLoaded by remember { mutableStateOf(false) }
+
+    // BitmapDescriptorFactory 一定要等地圖真正初始化完成（onMapLoaded 之後）才能呼叫，
+    // 太早呼叫（例如剛進畫面、地圖底層元件都還沒建立時）會直接讓 App 閃退
+    // （NullPointerException: IBitmapDescriptorFactory is not initialized）。
+    // 地圖還沒準備好之前先用 null（Marker 會顯示預設紅色圖示），準備好後再換成藍色。
+    val stayIcon = if (isMapLoaded) {
+        remember(isMapLoaded) { BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE) }
+    } else {
+        null
+    }
 
     GoogleMap(
         modifier = Modifier.fillMaxSize(),
@@ -343,18 +469,20 @@ private fun NavigationRouteMap(path: List<LatLngDto2>, alerts: List<AlertDto>) {
         if (pathLatLngs.size > 1) {
             Polyline(points = pathLatLngs, color = Color(0xFF4DD0E1), width = 10f)
         }
-        alertPoints.forEach { (alert, position) ->
+        // 警報紅點已移除，地圖上只標示停留點（藍色），畫面比較乾淨、聚焦在「停留多久」。
+        stayMarkerPoints.forEach { (stay, position) ->
             Marker(
                 state = MarkerState(position = position),
-                title = alert.object_name,
-                snippet = alert.description
+                title = "停留 ${formatDurationMinutes(stay.duration_seconds)}",
+                snippet = "${formatTimeOnly(stay.arrived_at)} 抵達",
+                icon = stayIcon
             )
         }
     }
 
-    LaunchedEffect(isMapLoaded, pathLatLngs, alertPoints) {
+    LaunchedEffect(isMapLoaded, pathLatLngs, stayMarkerPoints) {
         if (!isMapLoaded) return@LaunchedEffect
-        val allPoints = pathLatLngs + alertPoints.map { it.second }
+        val allPoints = pathLatLngs + stayMarkerPoints.map { it.second }
         if (allPoints.isEmpty()) return@LaunchedEffect
 
         if (allPoints.size == 1) {
@@ -373,13 +501,23 @@ private val isoParser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.
     timeZone = TimeZone.getTimeZone("UTC")
 }
 private val displayFormatter = SimpleDateFormat("yyyy/MM/dd HH:mm:ss", Locale.getDefault())
+private val timeOnlyFormatter = SimpleDateFormat("HH:mm", Locale.getDefault())
 
 private fun formatDateTime(iso: String?): String {
     if (iso.isNullOrBlank()) return "—"
     return runCatching { isoParser.parse(iso)?.let(displayFormatter::format) }.getOrNull() ?: iso
 }
 
+private fun formatTimeOnly(iso: String?): String {
+    if (iso.isNullOrBlank()) return "—"
+    return runCatching { isoParser.parse(iso)?.let(timeOnlyFormatter::format) }.getOrNull() ?: iso
+}
+
 private fun formatDurationMinutes(seconds: Int?): String {
     if (seconds == null) return "—"
     return "${seconds / 60} 分鐘"
+}
+
+private fun formatCoordinate(value: Double): String {
+    return String.format(Locale.US, "%.6f", value)
 }

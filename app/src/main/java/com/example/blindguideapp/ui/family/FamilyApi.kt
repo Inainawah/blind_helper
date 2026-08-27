@@ -62,16 +62,48 @@ data class AlertDto(
 )
 
 @Serializable
+data class StayPointDto(
+    val stay_point_id: Int,
+    val latitude: Double,
+    val longitude: Double,
+    val arrived_at: String? = null,
+    val left_at: String? = null,
+    val duration_seconds: Int
+)
+
+@Serializable
 data class NavigationDetailResponse(
     val success: Boolean,
     val navigation: NavigationDetailDto? = null,
     val path: List<LatLngDto2>? = null,
     val alerts: List<AlertDto>? = null,
+    val stay_points: List<StayPointDto>? = null,
     val message: String? = null
 )
 
 private val familyJson = Json { ignoreUnknownKeys = true }
 private val familyClient = OkHttpClient()
+
+@Serializable
+private data class FamilyApiErrorDetail(val code: String? = null, val message: String? = null)
+
+@Serializable
+private data class FamilyApiErrorEnvelope(val success: Boolean = false, val error: FamilyApiErrorDetail? = null)
+
+/**
+ * 後端失敗時回傳的是 { success:false, error:{ code, message } }，訊息包在 error 裡面，
+ * 不是最外層的 message 欄位。之前這裡漏了解析這一層，導致不管後端真正的錯誤是什麼，
+ * 畫面永遠只會顯示同一句沒有資訊量的「讀取失敗」，看不出真正卡在哪裡。
+ */
+private fun extractFamilyApiErrorMessage(bodyString: String?, httpCode: Int): String {
+    if (bodyString != null) {
+        val parsedMessage = runCatching {
+            familyJson.decodeFromString(FamilyApiErrorEnvelope.serializer(), bodyString).error?.message
+        }.getOrNull()
+        if (!parsedMessage.isNullOrBlank()) return parsedMessage
+    }
+    return "伺服器錯誤 (代碼 $httpCode)"
+}
 
 suspend fun fetchNavigationHistory(
     serverUrl: String,
@@ -85,7 +117,13 @@ suspend fun fetchNavigationHistory(
     try {
         familyClient.newCall(request).execute().use { response ->
             val bodyString = response.body?.string()
-                ?: return@withContext NavigationHistoryResponse(false, message = "回應為空")
+            if (!response.isSuccessful) {
+                return@withContext NavigationHistoryResponse(
+                    false,
+                    message = extractFamilyApiErrorMessage(bodyString, response.code)
+                )
+            }
+            if (bodyString == null) return@withContext NavigationHistoryResponse(false, message = "回應為空")
             familyJson.decodeFromString(NavigationHistoryResponse.serializer(), bodyString)
         }
     } catch (e: Exception) {
@@ -106,7 +144,13 @@ suspend fun fetchNavigationDetail(
     try {
         familyClient.newCall(request).execute().use { response ->
             val bodyString = response.body?.string()
-                ?: return@withContext NavigationDetailResponse(false, message = "回應為空")
+            if (!response.isSuccessful) {
+                return@withContext NavigationDetailResponse(
+                    false,
+                    message = extractFamilyApiErrorMessage(bodyString, response.code)
+                )
+            }
+            if (bodyString == null) return@withContext NavigationDetailResponse(false, message = "回應為空")
             familyJson.decodeFromString(NavigationDetailResponse.serializer(), bodyString)
         }
     } catch (e: Exception) {

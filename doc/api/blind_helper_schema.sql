@@ -175,6 +175,10 @@ CREATE INDEX idx_system_logs_user_created ON system_logs(user_id, created_at);
 CREATE TABLE location_logs (
     log_id INT AUTO_INCREMENT PRIMARY KEY,
     user_id INT NOT NULL,
+    -- 選填：這筆座標屬於哪一趟導航（App 內建家屬模式「查看詳情」用來
+    -- 事後算出停留點，見 backend/family_pairing.js 的 location-ping API）。
+    -- 為 NULL 代表這筆是 family.js 那套即時儀表板寫入的，跟特定導航無關。
+    navigation_id INT NULL,
     latitude DECIMAL(10,7) NOT NULL,
     longitude DECIMAL(10,7) NOT NULL,
     accuracy FLOAT,
@@ -182,7 +186,10 @@ CREATE TABLE location_logs (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_location_logs_user
         FOREIGN KEY (user_id) REFERENCES users(user_id)
-        ON DELETE CASCADE
+        ON DELETE CASCADE,
+    CONSTRAINT fk_location_logs_navigation
+        FOREIGN KEY (navigation_id) REFERENCES navigation_records(navigation_id)
+        ON DELETE SET NULL
 );
 
 -- 12. stay_points 停留點紀錄表
@@ -236,6 +243,7 @@ CREATE TABLE device_status (
 );
 
 CREATE INDEX idx_location_logs_user_recorded ON location_logs(user_id, recorded_at);
+CREATE INDEX idx_location_logs_navigation ON location_logs(navigation_id, recorded_at);
 CREATE INDEX idx_stay_points_user_arrived ON stay_points(user_id, arrived_at);
 CREATE INDEX idx_device_status_last_seen ON device_status(last_seen_at);
 
