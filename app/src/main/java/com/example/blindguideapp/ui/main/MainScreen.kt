@@ -333,6 +333,9 @@ fun CameraDetectionLayout(
     var isListening by remember { mutableStateOf(false) }
     var recognizedText by remember { mutableStateOf("尚未收到語音指令") }
     var navigationResult by remember { mutableStateOf<DirectionsResponse?>(null) }
+    var currentLatLng by remember { mutableStateOf<com.google.android.gms.maps.model.LatLng?>(null) }
+    var navCurrentStepIndex by remember { mutableStateOf(0) }
+    var navDistanceToTurn by remember { mutableStateOf(-1.0) }
     var showNavigationTab by remember { mutableStateOf(false) }
     // 目前這趟導航在後端的 navigation_id，供相機警報寫回 /api/environment-logs
     // 以及開始/結束時通知 /api/navigation/:id/start、/finish 使用（見下方 LaunchedEffect）。
@@ -421,6 +424,9 @@ DisposableEffect(Unit) {
     LaunchedEffect(navigationResult) {
         fusedLocationTracker.stop()
         activeGuide = null
+        currentLatLng = null
+        navCurrentStepIndex = 0
+        navDistanceToTurn = -1.0
 
         val result = navigationResult
         val navigationId = result?.navigation_id
@@ -482,7 +488,10 @@ DisposableEffect(Unit) {
         // 的停留點，不用即時判斷、不用額外狀態。
         var lastLocationReportMs = 0L
         fusedLocationTracker.start(intervalMs = 1500L) { location ->
+            currentLatLng = com.google.android.gms.maps.model.LatLng(location.latitude, location.longitude)
             guide.onLocation(GeoPoint(location.latitude, location.longitude))
+            navCurrentStepIndex = guide.currentStepIndex
+            navDistanceToTurn = guide.lastDistanceToTurn
 
             if (navigationId != null && userId != null) {
                 val now = System.currentTimeMillis()
@@ -786,6 +795,18 @@ DisposableEffect(Unit) {
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Bold
                                     )
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "離下個轉彎點: ${if (navDistanceToTurn < 0) "計算中" else String.format(java.util.Locale.US, "%.1f 公尺", navDistanceToTurn)} (第 ${navCurrentStepIndex + 1}/${result.steps?.size ?: 0} 步)",
+                                        color = Color(0xFFFFD54F),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
                                     Button(
                                         onClick = {
                                             val navigationId = currentNavigationId
@@ -809,12 +830,21 @@ DisposableEffect(Unit) {
 
                                 HorizontalDivider(color = Color(0x11FFFFFF), thickness = 1.dp)
 
+                                val steps = result.steps ?: emptyList()
+                                NavigationMap(
+                                    currentLatLng = currentLatLng,
+                                    steps = steps,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(180.dp)
+                                        .padding(vertical = 4.dp)
+                                )
+
                                 LazyColumn(
                                     modifier = Modifier.weight(1f).fillMaxWidth(),
                                     verticalArrangement = Arrangement.spacedBy(6.dp),
                                     contentPadding = PaddingValues(vertical = 4.dp)
                                 ) {
-                                    val steps = result.steps ?: emptyList()
                                     items(steps) { step ->
                                         Row(
                                             modifier = Modifier
@@ -1560,6 +1590,18 @@ Spacer(modifier = Modifier.height(16.dp))
                                             fontSize = 12.sp,
                                             fontWeight = FontWeight.Bold
                                         )
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "離下個轉彎點: ${if (navDistanceToTurn < 0) "計算中" else String.format(java.util.Locale.US, "%.1f 公尺", navDistanceToTurn)} (第 ${navCurrentStepIndex + 1}/${result.steps?.size ?: 0} 步)",
+                                            color = Color(0xFFFFD54F),
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
                                         Button(
                                             onClick = {
                                                 val navigationId = currentNavigationId
@@ -1583,12 +1625,21 @@ Spacer(modifier = Modifier.height(16.dp))
 
                                     HorizontalDivider(color = Color(0x11FFFFFF), thickness = 1.dp)
 
+                                    val steps = result.steps ?: emptyList()
+                                    NavigationMap(
+                                        currentLatLng = currentLatLng,
+                                        steps = steps,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(140.dp)
+                                            .padding(vertical = 2.dp)
+                                    )
+
                                     LazyColumn(
                                         modifier = Modifier.weight(1f).fillMaxWidth(),
                                         verticalArrangement = Arrangement.spacedBy(4.dp),
                                         contentPadding = PaddingValues(vertical = 2.dp)
                                     ) {
-                                        val steps = result.steps ?: emptyList()
                                         items(steps) { step ->
                                             Row(
                                                 modifier = Modifier
@@ -1638,6 +1689,89 @@ Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }
+
+@Composable
+fun NavigationMap(
+    currentLatLng: com.google.android.gms.maps.model.LatLng?,
+    steps: List<DirectionStep>,
+    modifier: Modifier = Modifier
+) {
+    val pathLatLngs = remember(steps) {
+        val points = mutableListOf<com.google.android.gms.maps.model.LatLng>()
+        steps.forEach { step ->
+            step.start_location?.let { points.add(com.google.android.gms.maps.model.LatLng(it.lat, it.lng)) }
+            step.end_location?.let { points.add(com.google.android.gms.maps.model.LatLng(it.lat, it.lng)) }
+        }
+        points
+    }
+
+    val cameraPositionState = com.google.maps.android.compose.rememberCameraPositionState()
+    var isMapLoaded by remember { mutableStateOf(false) }
+
+    val startPoint = pathLatLngs.firstOrNull()
+    val endPoint = pathLatLngs.lastOrNull()
+
+    // Autocenter on current location if available, otherwise path start
+    LaunchedEffect(isMapLoaded, currentLatLng, startPoint) {
+        if (!isMapLoaded) return@LaunchedEffect
+        val target = currentLatLng ?: startPoint
+        target?.let {
+            cameraPositionState.position = com.google.android.gms.maps.model.CameraPosition.fromLatLngZoom(it, 16f)
+        }
+    }
+
+    // Auto fit bounds initially
+    LaunchedEffect(isMapLoaded, pathLatLngs) {
+        if (!isMapLoaded || pathLatLngs.isEmpty()) return@LaunchedEffect
+        val boundsBuilder = com.google.android.gms.maps.model.LatLngBounds.Builder()
+        pathLatLngs.forEach { boundsBuilder.include(it) }
+        currentLatLng?.let { boundsBuilder.include(it) }
+        runCatching {
+            cameraPositionState.move(com.google.android.gms.maps.CameraUpdateFactory.newLatLngBounds(boundsBuilder.build(), 64))
+        }
+    }
+
+    com.google.maps.android.compose.GoogleMap(
+        modifier = modifier.clip(RoundedCornerShape(8.dp)),
+        cameraPositionState = cameraPositionState,
+        onMapLoaded = { isMapLoaded = true }
+    ) {
+        if (pathLatLngs.size > 1) {
+            com.google.maps.android.compose.Polyline(
+                points = pathLatLngs,
+                color = Color(0xFF4DD0E1),
+                width = 8f
+            )
+        }
+
+        startPoint?.let {
+            com.google.maps.android.compose.Marker(
+                state = com.google.maps.android.compose.MarkerState(position = it),
+                title = "起點"
+            )
+        }
+
+        endPoint?.let {
+            com.google.maps.android.compose.Marker(
+                state = com.google.maps.android.compose.MarkerState(position = it),
+                title = "終點"
+            )
+        }
+
+        currentLatLng?.let {
+            com.google.maps.android.compose.Marker(
+                state = com.google.maps.android.compose.MarkerState(position = it),
+                title = "目前位置",
+                icon = if (isMapLoaded) {
+                    com.google.android.gms.maps.model.BitmapDescriptorFactory.defaultMarker(com.google.android.gms.maps.model.BitmapDescriptorFactory.HUE_AZURE)
+                } else {
+                    null
+                }
+            )
+        }
+    }
+}
+
 @Composable
 fun HoldToTalkButton(
     isListening: Boolean,

@@ -64,6 +64,14 @@ class TurnByTurnGuide(
     // 記錄本步驟中偵測到的最小距離，作為通用避讓/步進機制（防止因定位誤差漏掉觸發點而卡住）。
     private var minDistanceObserved = Double.MAX_VALUE
 
+    private var lastLocation: GeoPoint? = null
+
+    var currentStepIndex = 0
+        private set
+
+    var lastDistanceToTurn = -1.0
+        private set
+
     var isFinished = false
         private set
 
@@ -78,15 +86,29 @@ class TurnByTurnGuide(
     fun onLocation(current: GeoPoint) {
         if (isFinished || currentIndex >= steps.size) return
 
+        // 備援機制：如果感測器沒有提供指南針朝向（如模擬器測試），
+        // 則利用前後兩次 GPS 定位的方向作為移動朝向。
+        if (!hasAzimuthReading && lastLocation != null) {
+            val movedDistance = distanceMeters(lastLocation!!, current)
+            if (movedDistance > 1.0) { // 距離大於 1 公尺才更新，避免 GPS 飄移雜訊
+                lastAzimuth = bearingDegrees(lastLocation!!, current)
+            }
+        }
+        lastLocation = current
+
         // 使用者剛開始導航、還沒走近任何轉彎點時，原本完全不會有語音提示，
         // 等於使用者站在原地不知道第一步要往哪走。這裡在定位跟指南針都
         // 準備好的第一時間，就先講一次「現在該往哪個方向走」。
-        if (!hasAnnouncedStartingDirection && hasAzimuthReading) {
+        if (!hasAnnouncedStartingDirection && (hasAzimuthReading || lastLocation != null)) {
             announceStartingDirection()
         }
 
         val step = steps[currentIndex]
         val distanceToTurn = distanceMeters(current, step.end)
+        lastDistanceToTurn = distanceToTurn
+        currentStepIndex = currentIndex
+
+        android.util.Log.d("TurnByTurnGuide", "onLocation: step=$currentIndex, dist=${String.format(java.util.Locale.US, "%.1f", distanceToTurn)}m, azimuth=$lastAzimuth")
 
         // 更新此步驟中的最小距離
         if (distanceToTurn < minDistanceObserved) {
@@ -207,7 +229,7 @@ class TurnByTurnGuide(
         val phrase = DirectionTranslator.relativeDirectionPhrase(deltaToPhone)
 
         when {
-            distanceToDestination <= TRIGGER_MAX_M && stage != Stage.TRIGGERED -> {
+            distanceToDestination <= FINAL_ARRIVAL_THRESHOLD_M && stage != Stage.TRIGGERED -> {
                 stage = Stage.TRIGGERED
                 vibrateShort()
                 speak("您已抵達目的地附近，目的地在您的$phrase，導航結束", true)
@@ -231,6 +253,7 @@ class TurnByTurnGuide(
         const val PRE_M = 15.0
         const val PREPARE_M = 5.0
         const val TRIGGER_MAX_M = 3.0
+        const val FINAL_ARRIVAL_THRESHOLD_M = 6.0
 
         // 走過轉角判定用的「相對移動距離」，故意設得比單純的絕對座標門檻寬鬆，
         // 才不會被手機 GPS 常見的數公尺誤差卡住。
