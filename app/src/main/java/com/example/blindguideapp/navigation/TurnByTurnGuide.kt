@@ -66,6 +66,12 @@ class TurnByTurnGuide(
 
     private var lastLocation: GeoPoint? = null
 
+    // 第一次「有意義地接近目的地」（進入 PRE_M 範圍）的時間，供抵達判定的
+    // 逾時備援使用；跟一般轉彎點不同，抵達目的地原本完全沒有任何備援機制，
+    // 只要 GPS 精準度不夠好、距離數字始終沒有精準落到 FINAL_ARRIVAL_THRESHOLD_M
+    // 以內，就會永遠不判定抵達——這裡補上跟轉彎點一樣的兩層保險。
+    private var nearDestinationSinceMs = 0L
+
     var currentStepIndex = 0
         private set
 
@@ -228,6 +234,10 @@ class TurnByTurnGuide(
         val deltaToPhone = angleDiffTo(lastAzimuth, bearingToDestination)
         val phrase = DirectionTranslator.relativeDirectionPhrase(deltaToPhone)
 
+        if (nearDestinationSinceMs == 0L && distanceToDestination <= PRE_M) {
+            nearDestinationSinceMs = System.currentTimeMillis()
+        }
+
         when {
             distanceToDestination <= FINAL_ARRIVAL_THRESHOLD_M && stage != Stage.TRIGGERED -> {
                 stage = Stage.TRIGGERED
@@ -235,6 +245,7 @@ class TurnByTurnGuide(
                 speak("您已抵達目的地附近，目的地在您的$phrase，導航結束", true)
                 isFinished = true
                 onCompleted()
+                return
             }
 
             distanceToDestination <= PREPARE_M && stage == Stage.ANNOUNCED_PRE -> {
@@ -246,6 +257,25 @@ class TurnByTurnGuide(
                 stage = Stage.ANNOUNCED_PRE
                 speak("前方 15 公尺處即為目的地，在您的$phrase", true)
             }
+        }
+
+        // 備援機制一：已經進入過目的地 15 公尺範圍內、又比觀測過的最小距離
+        // 遠了 4 公尺以上，代表已經走過頭或繞開了，不需要精準落在 6 公尺內。
+        val hasMovedPastDestination = minDistanceObserved <= PRE_M &&
+            (distanceToDestination - minDistanceObserved >= MOVED_PAST_TURN_M)
+
+        // 備援機制二：不管前面有沒有判定成功，第一次進入 15 公尺範圍後
+        // 等太久（跟轉彎點用同一個逾時秒數），就直接強制判定抵達，
+        // 確保導航絕對不會永遠卡在「快到了」卻講不出「到了」。
+        val hasWaitedTooLong = nearDestinationSinceMs != 0L &&
+            System.currentTimeMillis() - nearDestinationSinceMs >= FORCE_ADVANCE_TIMEOUT_MS
+
+        if (hasMovedPastDestination || hasWaitedTooLong) {
+            stage = Stage.TRIGGERED
+            vibrateShort()
+            speak("您已抵達目的地附近，目的地在您的$phrase，導航結束", true)
+            isFinished = true
+            onCompleted()
         }
     }
 
