@@ -39,6 +39,32 @@ function isValidPairingCode(value) {
 }
 
 /**
+ * 算出這趟導航「目前顯示用」的時長。
+ *
+ * 導航還在進行中（status = 'active'，還沒有人按「結束導航」，也還沒被
+ * 自動判定抵達）時，actual_duration_seconds 是 NULL，原本會退回顯示
+ * duration_seconds——但那其實是規劃路線當下 Google 估計的「預期」時間，
+ * 是一個固定不變的數字，不會隨著實際走了多久而更新，家屬中途查看時看到
+ * 的內容跟真實進度無關，容易誤會成「走了這麼久」。
+ *
+ * 改成：導航還在進行中時，直接用「現在時間 - started_at」即時算出真正
+ * 已經走了多久，家屬不用等視障使用者按下「結束導航」，隨時查看都能看到
+ * 正確、會持續增加的進行中時長。
+ */
+function resolveDisplayDurationSeconds(row) {
+    if (row.actual_duration_seconds != null) return row.actual_duration_seconds;
+
+    if (row.status === "active" && row.started_at) {
+        const elapsedSeconds = Math.floor(
+            (Date.now() - new Date(row.started_at).getTime()) / 1000
+        );
+        if (elapsedSeconds >= 0) return elapsedSeconds;
+    }
+
+    return row.duration_seconds;
+}
+
+/**
  * 產生一組尚未被使用的 6 碼配對碼。
  * 碼空間有 900000 組，此 App 的預期使用量極低，用「先查詢再使用」已經足夠，
  * 真正的併發碰撞則交給 device_profiles.pairing_code 的 UNIQUE 限制擋下。
@@ -287,7 +313,7 @@ router.get("/family/navigation-history", async (req, res) => {
                 start_address: row.start_address,
                 end_address: row.end_address,
                 distance_meters: row.actual_distance_meters ?? row.distance_meters,
-                duration_seconds: row.actual_duration_seconds ?? row.duration_seconds,
+                duration_seconds: resolveDisplayDurationSeconds(row),
                 alert_count: Number(row.alert_count),
                 status: row.status,
                 started_at: row.started_at,
@@ -423,7 +449,7 @@ router.get("/family/navigation-history/:navigation_id", async (req, res) => {
                         ? { lat: Number(record.end_latitude), lng: Number(record.end_longitude) }
                         : null,
                 distance_meters: record.actual_distance_meters ?? record.distance_meters,
-                duration_seconds: record.actual_duration_seconds ?? record.duration_seconds,
+                duration_seconds: resolveDisplayDurationSeconds(record),
                 status: record.status,
                 started_at: record.started_at,
                 ended_at: record.ended_at
