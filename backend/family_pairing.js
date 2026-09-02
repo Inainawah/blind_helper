@@ -363,18 +363,6 @@ router.get("/family/navigation-history/:navigation_id", async (req, res) => {
             });
         }
 
-        // 路徑取自建立路線時儲存的 route_summary（規劃路線，非事後回放的實際軌跡）。
-        const path = [];
-        try {
-            const summary = record.route_summary ? JSON.parse(record.route_summary) : null;
-            for (const step of summary?.steps ?? []) {
-                if (step.start_location) path.push(step.start_location);
-                if (step.end_location) path.push(step.end_location);
-            }
-        } catch (parseError) {
-            console.error("Parse route_summary failed:", parseError.message);
-        }
-
         const [alertRows] = await db.execute(
             `SELECT detection_id, object_name, confidence, description,
                     latitude, longitude, created_at
@@ -396,6 +384,29 @@ router.get("/family/navigation-history/:navigation_id", async (req, res) => {
         );
 
         const stayPoints = computeStayPoints(locationRows);
+
+        // 地圖上要畫的路徑，優先用這趟導航實際回報回來的 GPS 軌跡
+        // （locationRows，來自 App 導航中定期回報的座標），這樣家屬看到的
+        // 才是「導盲人真正走過的路」，不是 Google 規劃出來的理想路線。
+        // 只有在完全沒有實際軌跡資料時（例如很舊、這個功能上線前的紀錄，
+        // 或這趟導航太短還沒來得及回報半個座標點），才退回用 route_summary
+        // 規劃路線當備援，確保地圖至少還有東西可以顯示。
+        let path = locationRows.map((row) => ({
+            lat: Number(row.latitude),
+            lng: Number(row.longitude)
+        }));
+
+        if (path.length === 0) {
+            try {
+                const summary = record.route_summary ? JSON.parse(record.route_summary) : null;
+                for (const step of summary?.steps ?? []) {
+                    if (step.start_location) path.push(step.start_location);
+                    if (step.end_location) path.push(step.end_location);
+                }
+            } catch (parseError) {
+                console.error("Parse route_summary failed:", parseError.message);
+            }
+        }
 
         return res.status(200).json({
             success: true,

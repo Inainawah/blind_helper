@@ -34,7 +34,16 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.Priority
+import android.os.Looper
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -384,8 +393,8 @@ DisposableEffect(Unit) {
                 val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
                 recognizedText = text ?: "沒有內容"
                 if (!text.isNullOrBlank()) {
-                    val (lat, lng) = getCurrentLocation(context)
                     coroutineScope.launch {
+                        val (lat, lng) = getCurrentLocation(context)
                         handleVoiceCommand(context, text, serverUrl, lat, lng, deviceProfile?.userId, tts) { result ->
                             navigationResult = result
                             if (result != null || text.contains("哪裡") || text.contains("在哪")) {
@@ -1920,11 +1929,25 @@ data class DirectionsResponse(
 private val json = Json { ignoreUnknownKeys = true }
 private val client = OkHttpClient()
 
+/**
+ * 取得使用者目前的座標，用來當作規劃路線的起點。
+ *
+ * 原本這裡是用 LocationManager.getLastKnownLocation() 抓「上一次任何 App
+ * 留下來的定位快取」——這個快取可能是很久以前、甚至是精準度很差的基地台/
+ * Wi-Fi 定位，跟使用者實際站的位置可能差到幾十甚至上百公尺。因為整條路線
+ * 的每一個轉彎點座標，都是後端拿這個起點去問 Google Directions API 算出來
+ * 的，只要起點是錯的，後面整條路線（包含轉彎點）都會跟著一起偏移——這正好
+ * 可以解釋「明明人已經走到路口了，App 卻一直顯示還很遠、完全不出聲」的狀況。
+ *
+ * 改成最多等 6 秒收集連續幾次定位更新，取「精準度數字最小（越準）」的一次，
+ * 而不是只叫一次就直接採用。原因是 GPS 剛開始鎖定衛星訊號時，第一次讀數的
+ * 精準度往往比較差（實測看過 15~36 公尺的誤差），通常要再等一兩次更新，
+ * 精準度才會明顯進步；只拿第一次的結果，很容易讓整條路線的起點就偏移了
+ * 好幾十公尺。完全要不到定位時（例如剛開權限、GPS 訊號還沒鎖定）才退回
+ * 用舊的快取座標當備援，確保至少不會直接回傳 (0,0) 讓路線整個算錯地方。
+ */
 @SuppressLint("MissingPermission")
-fun getCurrentLocation(context: Context): Pair<Double, Double> {
-    val locationManager =
-        context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-
+suspend fun getCurrentLocation(context: Context): Pair<Double, Double> {
     val hasFineLocation =
         ContextCompat.checkSelfPermission(
             context,
@@ -1941,27 +1964,61 @@ fun getCurrentLocation(context: Context): Pair<Double, Double> {
         return Pair(0.0, 0.0)
     }
 
-    val providers = locationManager.getProviders(true)
-
+    // bestLocation 特意宣告在 withTimeoutOrNull 外面：就算 6 秒逾時、協程被
+    // 取消，這期間收集到的「目前最準的一次」還是留得住，逾時也不會整個沒有
+    // 座標可用，只是精準度可能沒那麼理想。
     var bestLocation: Location? = null
 
-    for (provider in providers) {
-        val location =
-            locationManager.getLastKnownLocation(provider) ?: continue
+    withTimeoutOrNull(6000L) {
+        suspendCancellableCoroutine<Unit> { continuation ->
+            val client = LocationServices.getFusedLocationProviderClient(context)
 
-        if (
-            bestLocation == null ||
-            location.time > bestLocation.time
-        ) {
-            bestLocation = location
+            val request = LocationRequest.Builder(1000L)
+                .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
+                .setMaxUpdates(6)
+                .build()
+
+            lateinit var callback: LocationCallback
+            callback = object : LocationCallback() {
+                override fun onLocationResult(result: LocationResult) {
+                    val location = result.lastLocation ?: return
+                    val current = bestLocation
+                    if (current == null || location.accuracy < current.accuracy) {
+                        bestLocation = location
+                    }
+                    // 精準度已經夠好（15 公尺內），不用等滿 6 次或 6 秒，馬上採用。
+                    if (location.accuracy <= 15f && continuation.isActive) {
+                        client.removeLocationUpdates(this)
+                        continuation.resume(Unit)
+                    }
+                }
+            }
+
+            continuation.invokeOnCancellation { client.removeLocationUpdates(callback) }
+            client.requestLocationUpdates(request, callback, Looper.getMainLooper())
         }
     }
 
-    return if (bestLocation != null) {
-        Pair(
-            bestLocation.latitude,
-            bestLocation.longitude
-        )
+    val freshLocation = bestLocation
+
+    if (freshLocation != null) {
+        return Pair(freshLocation.latitude, freshLocation.longitude)
+    }
+
+    // 備援：即時定位要不到的時候，才退回用舊的快取座標，避免完全沒有座標可用。
+    val locationManager =
+        context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+    val providers = locationManager.getProviders(true)
+    var cachedLocation: Location? = null
+    for (provider in providers) {
+        val location = locationManager.getLastKnownLocation(provider) ?: continue
+        if (cachedLocation == null || location.time > cachedLocation.time) {
+            cachedLocation = location
+        }
+    }
+
+    return if (cachedLocation != null) {
+        Pair(cachedLocation.latitude, cachedLocation.longitude)
     } else {
         Pair(0.0, 0.0)
     }

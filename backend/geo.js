@@ -53,45 +53,74 @@ function computeStayPoints(points, options = {}) {
     const stays = [];
     if (!points || points.length === 0) return stays;
 
-    let cluster = [points[0]];
+    const toLatLng = (p) => ({ latitude: Number(p.latitude), longitude: Number(p.longitude) });
+
+    const centroidOf = (pts) => {
+        const lat = pts.reduce((sum, p) => sum + Number(p.latitude), 0) / pts.length;
+        const lng = pts.reduce((sum, p) => sum + Number(p.longitude), 0) / pts.length;
+        return { latitude: lat, longitude: lng };
+    };
+
+    // clusterPoints：目前這個群集裡「真的拿來算中心點座標」的點，不含被判定
+    // 為單次雜訊、跳出去又立刻跳回來的離群點；clusterStart/clusterEnd 則是
+    // 這個群集實際涵蓋的起訖時間（連雜訊點本身的時間也算進去，這樣停留了
+    // 多久才不會被雜訊誤判打斷）。
+    let clusterPoints = [points[0]];
+    let clusterStart = points[0];
+    let clusterEnd = points[0];
 
     const flushCluster = () => {
-        if (cluster.length < 2) return;
+        if (clusterPoints.length < 2) return;
 
-        const arrivedAt = new Date(cluster[0].recorded_at);
-        const leftAt = new Date(cluster[cluster.length - 1].recorded_at);
+        const arrivedAt = new Date(clusterStart.recorded_at);
+        const leftAt = new Date(clusterEnd.recorded_at);
         const durationSeconds = (leftAt.getTime() - arrivedAt.getTime()) / 1000;
 
         if (durationSeconds >= minDurationSeconds) {
-            const avgLatitude =
-                cluster.reduce((sum, p) => sum + Number(p.latitude), 0) / cluster.length;
-            const avgLongitude =
-                cluster.reduce((sum, p) => sum + Number(p.longitude), 0) / cluster.length;
-
+            const center = centroidOf(clusterPoints);
             stays.push({
-                latitude: avgLatitude,
-                longitude: avgLongitude,
-                arrived_at: cluster[0].recorded_at,
-                left_at: cluster[cluster.length - 1].recorded_at,
+                latitude: center.latitude,
+                longitude: center.longitude,
+                arrived_at: clusterStart.recorded_at,
+                left_at: clusterEnd.recorded_at,
                 duration_seconds: Math.round(durationSeconds)
             });
         }
     };
 
-    for (let i = 1; i < points.length; i++) {
-        const previousPoint = points[i - 1];
+    let i = 1;
+    while (i < points.length) {
+        // 跟「目前群集的中心點」比距離，而不是只看前一個點或固定的第一個點：
+        // 手機 GPS 就算人完全沒動，連續兩次定位偶爾也會跳動 5~9 公尺（屬於
+        // 正常誤差範圍），用平均中心點可以讓單一次的跳動不會影響太大。
+        const center = centroidOf(clusterPoints);
         const currentPoint = points[i];
+        const distanceFromCenter = distanceMeters(center, toLatLng(currentPoint));
 
-        const adjacentDistance = distanceMeters(
-            { latitude: Number(previousPoint.latitude), longitude: Number(previousPoint.longitude) },
-            { latitude: Number(currentPoint.latitude), longitude: Number(currentPoint.longitude) }
-        );
+        if (distanceFromCenter <= radiusMeters) {
+            clusterPoints.push(currentPoint);
+            clusterEnd = currentPoint;
+            i++;
+            continue;
+        }
 
-        if (adjacentDistance <= radiusMeters) {
-            cluster.push(currentPoint);
+        // 這個點超出範圍，先看下一個點是不是馬上又跳回範圍內：如果是，
+        // 代表這只是單次的定位雜訊（GPS 偶爾的跳動），忽略這個點本身
+        // （不拿去平均中心點座標），但時間照樣往前推進、不中斷整段停留；
+        // 如果接下來也持續在範圍外，才代表使用者真的離開了，正式結束這個群集。
+        const nextPoint = points[i + 1];
+        const nextIsBackInRange =
+            nextPoint != null && distanceMeters(center, toLatLng(nextPoint)) <= radiusMeters;
+
+        if (nextIsBackInRange) {
+            clusterEnd = currentPoint;
+            i++;
         } else {
             flushCluster();
-            cluster = [currentPoint];
+            clusterPoints = [currentPoint];
+            clusterStart = currentPoint;
+            clusterEnd = currentPoint;
+            i++;
         }
     }
     flushCluster();
