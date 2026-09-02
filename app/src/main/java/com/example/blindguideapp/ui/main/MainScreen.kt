@@ -473,7 +473,12 @@ DisposableEffect(Unit) {
                 )
             },
             vibrateShort = { guidanceVibrator.shortDoubleBuzz() },
-            onCompleted = {
+            onCompleted = {tts?.speak(
+        "已到達目的地",
+        TextToSpeech.QUEUE_FLUSH,
+        null,
+        "navigation_arrived"
+    )
                 if (navigationId != null && userId != null) {
                     coroutineScope.launch {
                         finishNavigationSession(serverUrl, navigationId, userId, "completed")
