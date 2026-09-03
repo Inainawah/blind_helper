@@ -52,12 +52,23 @@ function isValidPairingCode(value) {
  * 正確、會持續增加的進行中時長。
  */
 function resolveDisplayDurationSeconds(row) {
-    if (row.actual_duration_seconds != null) return row.actual_duration_seconds;
+    // actual_duration_seconds 有值且 > 0，代表 /finish 有正常算出實際時長。
+    if (row.actual_duration_seconds != null && row.actual_duration_seconds > 0) {
+        return row.actual_duration_seconds;
+    }
 
-    if (row.status === "active" && row.started_at) {
-        const elapsedSeconds = Math.floor(
-            (Date.now() - new Date(row.started_at).getTime()) / 1000
+    // actual_duration_seconds = 0 的舊紀錄：嘗試用 created_at → ended_at 補算。
+    if (row.actual_duration_seconds === 0 && row.ended_at && row.created_at) {
+        const fallback = Math.floor(
+            (new Date(row.ended_at).getTime() - new Date(row.created_at).getTime()) / 1000
         );
+        if (fallback > 0) return fallback;
+    }
+
+    // 導航正在進行中：即時算出已經過了多久。
+    if (row.status === "active" && (row.started_at || row.created_at)) {
+        const startTime = new Date(row.started_at || row.created_at).getTime();
+        const elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
         if (elapsedSeconds >= 0) return elapsedSeconds;
     }
 

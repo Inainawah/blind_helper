@@ -1931,10 +1931,19 @@ app.patch(
                         COALESCE(
                             TIMESTAMPDIFF(
                                 SECOND,
-                                started_at,
+                                COALESCE(
+                                    started_at,
+                                    created_at
+                                ),
                                 CURRENT_TIMESTAMP
                             ),
                             0
+                        ),
+
+                    started_at =
+                        COALESCE(
+                            started_at,
+                            created_at
                         )
 
                 WHERE navigation_id = ?
