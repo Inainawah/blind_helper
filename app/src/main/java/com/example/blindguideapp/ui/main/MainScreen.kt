@@ -514,12 +514,21 @@ DisposableEffect(Unit) {
                 )
             },
             vibrateShort = { guidanceVibrator.shortDoubleBuzz() },
-            onCompleted = {tts?.speak(
-        "已到達目的地",
-        TextToSpeech.QUEUE_FLUSH,
-        null,
-        "navigation_arrived"
-    )
+            onCompleted = {
+                tts?.speak(
+                    "已到達目的地",
+                    TextToSpeech.QUEUE_FLUSH,
+                    null,
+                    "navigation_arrived"
+                )
+                // 抵達之後除了通知後端這趟結束了，手機端的定位追蹤也要一起停掉。
+                // 原本這裡只有呼叫 /finish，定位追蹤（fusedLocationTracker）沒有跟著
+                // 停止，導致抵達後只要使用者沒有馬上講新目的地，手機還是會繼續
+                // 每 1.5 秒定位、每 20 秒回報座標，而且會回報到「這筆已經標記完成」
+                // 的舊 navigation_id 上，把不相關的座標混進這趟已結束導航的路徑跟
+                // 停留點資料裡（實測發現抵達後幾分鐘、甚至幾十分鐘後還有座標混進來，
+                // 其中還有一筆座標整個跳到一百多公里外，明顯是不相關的雜訊）。
+                fusedLocationTracker.stop()
                 if (navigationId != null && userId != null) {
                     coroutineScope.launch {
                         finishNavigationSession(serverUrl, navigationId, userId, "completed")
