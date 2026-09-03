@@ -28,33 +28,33 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
     private val isQuantized = modelPath.contains("int8", ignoreCase = true)
     private val numBytesPerChannel = if (isQuantized) 1 else 4 // INT8 模型用 1 byte，Float32 模型用 4 bytes
 
-    // Class names mapping (same as python CLASS_NAME_TW)
+    // 類別名稱對照表（繁體中文）
     val classNamesTw = mapOf(
         0 to "人", 1 to "腳踏車", 2 to "汽車", 3 to "機車",
         5 to "公車", 7 to "卡車", 9 to "紅綠燈",
         10 to "消防栓", 11 to "停止標誌", 12 to "停車收費錶", 13 to "長椅",
         15 to "貓", 16 to "狗",
         24 to "背包", 25 to "雨傘", 26 to "手提包", 28 to "行李箱",
-        32 to "球類", 34 to "棒球棍", 35 to "棒球手套", 36 to "滑板",
+        32 to "球類", 35 to "棒球手套", 36 to "滑板",
         38 to "網球拍", 39 to "瓶子", 40 to "高腳杯", 41 to "杯子",
         56 to "椅子", 57 to "沙發", 58 to "盆栽", 60 to "餐桌",
         72 to "冰箱", 75 to "花瓶", 80 to "桌子"
     )
 
-    // English labels for configuration lookup
+    // 英文標籤對照表（用於配置查詢）
     val classNamesEn = mapOf(
         0 to "person", 1 to "bicycle", 2 to "car", 3 to "motorcycle",
         5 to "bus", 7 to "truck", 9 to "traffic light",
         10 to "fire hydrant", 11 to "stop sign", 12 to "parking meter", 13 to "bench",
         15 to "cat", 16 to "dog",
         24 to "backpack", 25 to "umbrella", 26 to "handbag", 28 to "suitcase",
-        32 to "sports ball", 34 to "baseball bat", 35 to "baseball glove", 36 to "skateboard",
+        32 to "sports ball", 35 to "baseball glove", 36 to "skateboard",
         38 to "tennis racket", 39 to "bottle", 40 to "wine glass", 41 to "cup",
         56 to "chair", 57 to "couch", 58 to "potted plant", 60 to "dining table",
         72 to "refrigerator", 75 to "vase", 80 to "table"
     )
 
-    // Area thresholds for 2-meter warnings (box area on 640x640 resolution)
+    // 2 公尺預警面積門檻值（基於 640x640 解析度）
     val areaThresholds2M = mapOf(
         "person" to 69000f,
         "bicycle" to 45000f,
@@ -74,7 +74,6 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
         "handbag" to 15000f,
         "suitcase" to 60500f,
         "sports ball" to 2500f,
-        "baseball bat" to 3000f,
         "baseball glove" to 5000f,
         "skateboard" to 8000f,
         "tennis racket" to 6000f,
@@ -132,7 +131,7 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
             val options = Interpreter.Options().apply {
                 setNumThreads(4)
             }
-            // Load TFLite model using pure Android APIs
+            // 使用 Android 原生 API 載入 TFLite 模型
             val fileDescriptor = context.assets.openFd(modelPath)
             val inputStream = java.io.FileInputStream(fileDescriptor.fileDescriptor)
             val fileChannel = inputStream.channel
@@ -150,16 +149,16 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
     fun detect(bitmap: Bitmap, rotationDegrees: Int): List<Detection> = synchronized(interpreterLock) {
         val interp = interpreter ?: return@synchronized emptyList()
 
-        // 🎯 關鍵優化：計算正方形尺寸，後續由 ImageProcessor.ResizeWithCropOrPadOp 於 Native 進行置中裁剪，避免額外 Bitmap 記憶體分配
+        // 關鍵優化：計算正方形尺寸，後續由 ImageProcessor.ResizeWithCropOrPadOp 於 Native 進行置中裁剪，避免額外 Bitmap 記憶體分配
         val width = bitmap.width
         val height = bitmap.height
         val squareSize = if (width < height) width else height
 
-        // 1. Efficient preprocessing using TFLite Support Library
+        // 1. 使用 TFLite Support Library 進行高效前處理
         val tensorImage = TensorImage(if (isQuantized) DataType.UINT8 else DataType.FLOAT32)
         tensorImage.load(bitmap)
 
-        // Convert clockwise rotation to counter-clockwise for Rot90Op
+        // 將順時針旋轉角度轉換為 Rot90Op 所需的逆時針旋轉
         val k = (360 - rotationDegrees) % 360 / 90
 
         val imageProcessor = ImageProcessor.Builder()
@@ -176,20 +175,20 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
         val processedImage = imageProcessor.process(tensorImage)
         val byteBuffer = processedImage.buffer
 
-        // Output shape is [1, 300, 6]
+        // 輸出維度為 [1, 300, 6]
         val outputBuffer = Array(1) { Array(300) { FloatArray(6) } }
 
-        // 2. Inference
+        // 2. 執行模型推論
         interp.run(byteBuffer, outputBuffer)
 
-        // 3. Postprocess
+        // 3. 後處理
         val detections = mutableListOf<Detection>()
         val rawOutputs = outputBuffer[0]
 
         for (i in 0 until 300) {
             val box = rawOutputs[i]
             val confidence = box[4]
-            if (confidence < 0.45f) continue // Filter confidence <= 45%
+            if (confidence < 0.45f) continue // 過濾信心度低於 45% 的預測
 
             val classId = box[5].toInt()
             val labelEn = classNamesEn[classId] ?: "unknown"
@@ -200,7 +199,7 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
             var rx2 = box[2]
             var ry2 = box[3]
 
-            // If coordinates are in absolute pixel space (0-640), normalize them to 0-1
+            // 若座標為絕對像素空間（0-640），將其正規化至 0-1
             if (rx1 > 1.1f || rx2 > 1.1f || ry1 > 1.1f || ry2 > 1.1f) {
                 rx1 /= 640f
                 ry1 /= 640f
@@ -208,11 +207,11 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
                 ry2 /= 640f
             }
 
-            // Calculate pixel area in 640x640 space
+            // 計算在 640x640 空間下的像素面積
             val w = (rx2 - rx1) * 640f
             val h = (ry2 - ry1) * 640f
             
-            // Aspect ratio filter to reduce false positives
+            // 長寬比過濾以減少誤判
             if (w <= 0f || h <= 0f) continue
             val aspectRatio = w / h
             val limit = aspectLimitMap[labelEn]

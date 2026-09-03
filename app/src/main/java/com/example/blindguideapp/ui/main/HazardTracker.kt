@@ -14,7 +14,7 @@ class TrackedObject(
     var lastArea: Float = 0f
     var lastUpdated: Long = System.currentTimeMillis()
     
-    // History stores Pair(timestampMs, areaInPixels)
+    // 歷史紀錄儲存 Pair(時間戳記毫秒, 像素面積)
     val history = mutableListOf<Pair<Long, Float>>()
     
     fun update(x: Float, y: Float, area: Float, timestamp: Long) {
@@ -23,20 +23,20 @@ class TrackedObject(
         lastArea = area
         lastUpdated = timestamp
         history.add(Pair(timestamp, area))
-        // Keep history only for the last 1.0 second to calculate short-term rate of change
+        // 僅保留過去 1.0 秒內的歷史紀錄以計算短期變化率
         history.removeAll { it.first < timestamp - 1000L }
     }
     
     /**
-     * Calculates the rate of area change (pixels per second).
-     * Positive value indicates the object is getting larger (closer).
+     * 計算面積變化率（像素/秒）。
+     * 正值表示物件正在變大（靠近）。
      */
     fun getAreaChangeRate(): Float {
         if (history.size < 2) return 0f
         val first = history.first()
         val last = history.last()
-        val dt = (last.first - first.first) / 1000f // in seconds
-        if (dt <= 0.05f) return 0f // avoid division by very small number or zero
+        val dt = (last.first - first.first) / 1000f // 單位為秒
+        if (dt <= 0.05f) return 0f // 避免除以極小數值或零
         return (last.second - first.second) / dt
     }
 }
@@ -45,14 +45,14 @@ class HazardTracker {
     val trackedObjects = mutableListOf<TrackedObject>()
     
     /**
-     * Updates tracked objects with new frame detections.
-     * Returns a list of detections paired with their calculated area change rate (pixels per second).
+     * 使用新影格的偵測結果更新追蹤物件。
+     * 回傳偵測物件及其計算後的面積變化率（像素/秒）配對清單。
      */
     fun update(detections: List<YoloDetector.Detection>): List<Pair<YoloDetector.Detection, Float>> {
         val currentTime = System.currentTimeMillis()
         val results = mutableListOf<Pair<YoloDetector.Detection, Float>>()
         
-        // Only track dangerous objects
+        // 僅追蹤具有危險性的物件
         val dangerDetections = detections.filter { it.isDanger }
         
         val matchedTracked = mutableSetOf<TrackedObject>()
@@ -62,11 +62,11 @@ class HazardTracker {
             val cy = (det.y1 + det.y2) / 2f
             val w = det.x2 - det.x1
             val h = det.y2 - det.y1
-            val area = w * h * 640f * 640f // Area in 640x640 space
+            val area = w * h * 640f * 640f // 640x640 空間下的面積
             
-            // Find the closest tracked object of same class
+            // 尋找同類別中最接近的追蹤物件
             var bestTrack: TrackedObject? = null
-            var minDistance = 0.3f // maximum normalized centroid distance threshold
+            var minDistance = 0.3f // 最大正規化質心距離門檻值
             
             for (track in trackedObjects) {
                 if (track in matchedTracked) continue
@@ -94,7 +94,7 @@ class HazardTracker {
             results.add(Pair(det, rate))
         }
         
-        // Remove tracked objects that haven't been updated for 1.5 seconds
+        // 移除超過 1.5 秒未更新的追蹤物件
         trackedObjects.removeAll { currentTime - it.lastUpdated > 1500L }
         
         return results

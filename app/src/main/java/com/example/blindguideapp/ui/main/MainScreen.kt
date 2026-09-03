@@ -136,7 +136,7 @@ fun MainScreen(
     Manifest.permission.ACCESS_COARSE_LOCATION
     )
 
-    // States
+    // 狀態變數
     var hasPermissions by remember {
         mutableStateOf(
             permissions.all {
@@ -210,7 +210,7 @@ fun CameraDetectionLayout(
     val lastAlertFinishedTime = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val lastAlertStartTime = remember { java.util.concurrent.atomic.AtomicLong(0L) }
 
-    // Initialize TTS
+    // 初始化 TTS 語音引擎
     var tts by remember { mutableStateOf<TextToSpeech?>(null) }
     var ttsInitialized by remember { mutableStateOf(false) }
 
@@ -226,14 +226,22 @@ fun CameraDetectionLayout(
     // 講完再放，確保路徑指示一定能完整講完。
     val isNavigationSpeaking = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
 
+    // 開啟 App 時的歡迎與操作說明語音正在播放中；播放期間相機障礙物警報暫停播報，
+    // 避免剛開 App 就被障礙物警報（尤其是 QUEUE_FLUSH 緊急警報）直接截斷中斷。
+    val isIntroSpeaking = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+
     LaunchedEffect(ttsInitialized) {
         if (ttsInitialized) {
-            tts?.speak(
+            isIntroSpeaking.set(true)
+            val result = tts?.speak(
                 "歡迎使用vigo。本 App 會透過相機，為您辨識障礙物，並用語音提醒您方向。請點擊螢幕右上角並說出目的地後，開始為您導航。",
                 TextToSpeech.QUEUE_FLUSH,
                 null,
                 "welcome_intro"
             )
+            if (result != TextToSpeech.SUCCESS) {
+                isIntroSpeaking.set(false)
+            }
         }
     }
 
@@ -258,13 +266,18 @@ fun CameraDetectionLayout(
 
         ttsEngine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {
-                if (utteranceId != null && utteranceId.startsWith("turn_guide_")) {
+                if (utteranceId == "welcome_intro") {
+                    isIntroSpeaking.set(true)
+                } else if (utteranceId != null && utteranceId.startsWith("turn_guide_")) {
                     isNavigationSpeaking.set(true)
                 }
             }
 
             override fun onDone(utteranceId: String?) {
-                if (utteranceId != null) {
+                if (utteranceId == "welcome_intro") {
+                    isIntroSpeaking.set(false)
+                    lastAlertFinishedTime.set(System.currentTimeMillis() + 500L)
+                } else if (utteranceId != null) {
                     navigationUtteranceRegistry.remove(utteranceId)
                     if (utteranceId.startsWith("turn_guide_")) isNavigationSpeaking.set(false)
                 }
@@ -272,13 +285,18 @@ fun CameraDetectionLayout(
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
-                if (utteranceId != null) {
+                if (utteranceId == "welcome_intro") {
+                    isIntroSpeaking.set(false)
+                } else if (utteranceId != null) {
                     navigationUtteranceRegistry.remove(utteranceId)
                     if (utteranceId.startsWith("turn_guide_")) isNavigationSpeaking.set(false)
                 }
             }
 
             override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                if (utteranceId == "welcome_intro") {
+                    isIntroSpeaking.set(false)
+                }
                 // 導航語音被警報插播打斷（interrupted = true）：把同一句話重新排回去播放，
                 // 不會就這樣消失不見。如果連續被打斷好幾次（路口警報密集的情況），
                 // 就改用強制插播，確保使用者最終一定聽得到轉彎指示。
@@ -305,7 +323,7 @@ fun CameraDetectionLayout(
         }
     }
 
-    // Initialize YOLO Detector and Hazard Tracker
+    // 初始化 YOLO 辨識器與危險追蹤器
     val detector = remember { YoloDetector(context, "yolo26s_float32.tflite") }
     DisposableEffect(detector) {
         onDispose {
@@ -332,7 +350,7 @@ fun CameraDetectionLayout(
         }
     }
 
-    // State parameters
+    // 畫面狀態參數
     var detections by remember { mutableStateOf<List<YoloDetector.Detection>>(emptyList()) }
     var isFlashlightOn by remember { mutableStateOf(false) }
     var camera by remember { mutableStateOf<Camera?>(null) }
@@ -539,7 +557,7 @@ DisposableEffect(Unit) {
         activeGuide?.onAzimuth(compassAzimuth)
     }
 
-    // Pulse animation for status indicator
+    // 狀態指示燈的呼吸燈動畫
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val alphaAnim by infiniteTransition.animateFloat(
         initialValue = 0.3f,
@@ -551,15 +569,15 @@ DisposableEffect(Unit) {
         label = "alpha"
     )
 
-    // Trigger TTS and logs when danger is detected (Priority & Preemption Logic)
+    // 偵測到危險時觸發語音與紀錄（優先級與搶佔邏輯）
     LaunchedEffect(detections) {
-        if (!ttsInitialized) return@LaunchedEffect
+        if (!ttsInitialized || isIntroSpeaking.get()) return@LaunchedEffect
 
-        // Track the detections and obtain their rates of area change
+        // 追蹤偵測物件並取得面積變化率
         val trackedResults = tracker.update(detections)
         if (trackedResults.isEmpty()) return@LaunchedEffect
 
-        // Calculate a composite priority score for each tracked threat
+        // 為每個追蹤的威脅計算綜合優先級分數
         val prioritizedThreats = trackedResults.map { (det, rate) ->
             val proximity = det.proximity
             val rateFactor = if (rate > 0f) rate / 15000f else 0f
@@ -567,7 +585,7 @@ DisposableEffect(Unit) {
             Triple(det, rate, priority)
         }
 
-        // Find the highest priority threat
+        // 尋找最高優先級的威脅
         val highestPriorityThreat = prioritizedThreats.maxByOrNull { it.third } ?: return@LaunchedEffect
         val (det, rate, priority) = highestPriorityThreat
 
@@ -575,12 +593,11 @@ DisposableEffect(Unit) {
         val lockedUntil = lastAlertFinishedTime.get()
         val lastSpeakTime = lastAlertStartTime.get()
 
-        // Urgent threat: rapid approach (rate >= 20000) or high priority (priority >= 2.5)
+        // 緊急威脅：快速接近（變化率 >= 20000）或高優先級（優先級 >= 2.5）
         val isUrgent = rate >= 20000f || priority >= 2.5f
 
-        // Cooldown Preemption Rule: Urgent hazards immediately bypass the 3s cooldown
-        // if they represent a new class OR a significant increase in priority (>0.5) for the same class.
-        // Also enforce a minimum interval (e.g. 1.0s) since last alert started, to prevent stutters between classes.
+        // 冷卻搶佔規則：若是新類別或同類別優先級顯著增加（>0.5），緊急威脅會立即略過 3 秒冷卻時間。
+        // 同時確保距離上次播報開始至少經過最小間隔（如 1.0 秒），避免不同類別間連續跳字結巴。
         val minSpeakDurationMs = 1000L
         val hasSpokenLongEnough = currentTime - lastSpeakTime >= minSpeakDurationMs
         val shouldPreempt = isUrgent && hasSpokenLongEnough && (det.classId != lastSpokenClassId || priority >= lastSpokenPriority + 0.5f)
@@ -589,12 +606,12 @@ DisposableEffect(Unit) {
             val name = det.labelTw
             val alertMsg = "${det.direction}有 $name"
 
-            // Shorten cooldown for urgent preemptive alerts to remain highly responsive
-            // Scaled for 1.3f speech rate
+            // 縮短緊急搶佔警報的冷卻時間以保持高度即時反應
+            // 根據 1.3 倍語速調整估算時間
             val estimatedSpeechDurationMs = alertMsg.length * 250L + 300L
             val cooldownMs = if (isUrgent) 1000L else 3000L
             lastAlertFinishedTime.set(currentTime + estimatedSpeechDurationMs + cooldownMs)
-            lastAlertStartTime.set(currentTime) // Record the start time of the speech
+            lastAlertStartTime.set(currentTime) // 記錄語音播報開始時間
             
             lastSpokenClassId = det.classId
             lastSpokenPriority = priority
@@ -610,7 +627,7 @@ DisposableEffect(Unit) {
         "queued_alert_$currentTime"
     )
 } else if (isUrgent) {
-    // Use QUEUE_FLUSH to preempt immediately
+    // 使用 QUEUE_FLUSH 立即插播搶佔
     tts?.speak(
         alertMsg,
         TextToSpeech.QUEUE_FLUSH,
@@ -626,7 +643,7 @@ DisposableEffect(Unit) {
     )
 }
 
-            // Log entry
+            // 新增日誌條目
             val timeStamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
             if (alertLogs.size > 20) {
                 alertLogs.removeAt(alertLogs.size - 1)
@@ -662,7 +679,7 @@ DisposableEffect(Unit) {
 
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
 
-    // Detect current screen orientation
+    // 偵測目前螢幕方向
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
@@ -672,13 +689,13 @@ DisposableEffect(Unit) {
             .background(Color.Black)
     ) {
         if (isLandscape) {
-            // Landscape Layout: Camera square centered with black masks on left and right sides
+            // 橫向佈局：相機正方形置中，左右兩側為控制面板
             Row(
                 modifier = Modifier
                     .fillMaxSize()
                     .safeDrawingPadding()
             ) {
-                // Left Panel: History alert logs & Navigation
+                // 左側面板：歷史警告日誌與導航
                 Column(
                     modifier = Modifier
                         .weight(1f)
@@ -918,7 +935,7 @@ DisposableEffect(Unit) {
                     }
                 }
 
-                // Center Box: Camera Preview & Canvas (Locked at 1:1 Square)
+                // 中央區塊：相機預覽與畫布（鎖定 1:1 正方形）
                 Box(
                     modifier = Modifier
                         .fillMaxHeight()
@@ -927,7 +944,7 @@ DisposableEffect(Unit) {
                         .border(2.dp, Color.White.copy(alpha = 0.3f))
                         .background(Color.Black)
                 ) {
-                    // CameraX PreviewView with optimized Camera2 settings
+                    // 具備 Camera2 優化設定的 CameraX PreviewView
                     AndroidView(
                         factory = { ctx ->
                             val previewView = PreviewView(ctx).apply {
@@ -939,7 +956,7 @@ DisposableEffect(Unit) {
                             cameraProviderFuture.addListener({
                                 val cameraProvider = cameraProviderFuture.get()
 
-                                // Configure Preview with Camera2 autofocus & motion blur reduction controls
+                                // 使用 Camera2 自動對焦與動態模糊抑制設定 Preview
                                 val previewBuilder = Preview.Builder()
                                 val previewExtender = Camera2Interop.Extender(previewBuilder)
                                 previewExtender.setCaptureRequestOption(
@@ -958,7 +975,7 @@ DisposableEffect(Unit) {
                                     it.setSurfaceProvider(previewView.surfaceProvider)
                                 }
 
-                                // Configure ImageAnalysis with target 640x640 resolution
+                                // 設定目標解析度為 640x640 的 ImageAnalysis
                                 val resolutionSelector = ResolutionSelector.Builder()
                                     .setResolutionStrategy(
                                         ResolutionStrategy(
@@ -1020,27 +1037,27 @@ DisposableEffect(Unit) {
                         modifier = Modifier.fillMaxSize()
                     )
 
-                    // Overlay Canvas for Bounding Boxes
+                    // 繪製辨識外框的覆蓋畫布
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         val canvasW = size.width
                         val canvasH = size.height
 
                         detections.forEach { det ->
-                            // Coordinates from model are normalized 0..1
+                            // 來自模型的座標已正規化為 0..1
                             val left = det.x1 * canvasW
                             val top = det.y1 * canvasH
                             val right = det.x2 * canvasW
                             val bottom = det.y2 * canvasH
 
                             val strokeColor = if (det.isDanger) {
-                                Color(0xFFE57373) // Bright warnings red
+                                Color(0xFFE57373) // 危險警告亮紅色
                             } else {
-                                Color(0x8081C784) // Subtle green for safe
+                                Color(0x8081C784) // 安全半透明綠色
                             }
 
                             val strokeWidth = if (det.isDanger) 6f else 3f
 
-                            // Draw bounding box
+                            // 繪製邊界框
                             drawRoundRect(
                                 color = strokeColor,
                                 topLeft = androidx.compose.ui.geometry.Offset(left, top),
@@ -1052,7 +1069,7 @@ DisposableEffect(Unit) {
                     }
                 }
 
-                // Right Panel: Controls & Danger Alert
+                // 右側面板：控制項與危險警報
                 Column(
                     modifier = Modifier
                         .weight(1f)
@@ -1090,7 +1107,7 @@ Text(
     fontWeight = FontWeight.Bold
 )
 Spacer(modifier = Modifier.height(16.dp))
-                    // Status Pill
+                    // 狀態膠囊指示標籤
                     Row(
                         modifier = Modifier
                             .clip(RoundedCornerShape(20.dp))
@@ -1114,7 +1131,7 @@ Spacer(modifier = Modifier.height(16.dp))
                         )
                     }
 
-                    // Flashlight Toggle
+                    // 手電筒開關
                     IconButton(
                         onClick = {
                             val currentCamera = camera
@@ -1151,7 +1168,7 @@ Spacer(modifier = Modifier.height(16.dp))
 
                     Spacer(modifier = Modifier.weight(1f))
 
-                    // Danger indicator if any danger items detected
+                    // 若偵測到危險物件則顯示危險指示器
                     val dangerousItems = detections.filter { it.isDanger }
                     val closestDangerItem = dangerousItems.maxByOrNull { it.proximity }
                     if (closestDangerItem != null) {
@@ -1183,7 +1200,7 @@ Spacer(modifier = Modifier.height(16.dp))
                             }
                         }
                     } else {
-                        // Safe state indicator card
+                        // 安全狀態指示卡片
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1216,13 +1233,13 @@ Spacer(modifier = Modifier.height(16.dp))
                 }
             }
         } else {
-            // Portrait Layout: Top Camera Square, Bottom Console & Alerts
+            // 直向佈局：上方相機正方形，下方控制台與警報
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .safeDrawingPadding()
             ) {
-                // 1. Camera Preview Area (Square 1:1)
+                // 1. 相機預覽區（1:1 正方形）
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1230,7 +1247,7 @@ Spacer(modifier = Modifier.height(16.dp))
                         .clipToBounds()
                         .background(Color.Black)
                 ) {
-                    // CameraX PreviewView with optimized Camera2 settings
+                    // 具備 Camera2 優化設定的 CameraX PreviewView
                     AndroidView(
                         factory = { ctx ->
                             val previewView = PreviewView(ctx).apply {
@@ -1242,7 +1259,7 @@ Spacer(modifier = Modifier.height(16.dp))
                             cameraProviderFuture.addListener({
                                 val cameraProvider = cameraProviderFuture.get()
 
-                                // Configure Preview with Camera2 autofocus & motion blur reduction controls
+                                // 使用 Camera2 自動對焦與動態模糊抑制設定 Preview
                                 val previewBuilder = Preview.Builder()
                                 val previewExtender = Camera2Interop.Extender(previewBuilder)
                                 previewExtender.setCaptureRequestOption(
@@ -1261,7 +1278,7 @@ Spacer(modifier = Modifier.height(16.dp))
                                     it.setSurfaceProvider(previewView.surfaceProvider)
                                 }
 
-                                // Configure ImageAnalysis with target 640x640 resolution
+                                // 設定目標解析度為 640x640 的 ImageAnalysis
                                 val resolutionSelector = ResolutionSelector.Builder()
                                     .setResolutionStrategy(
                                         ResolutionStrategy(
@@ -1323,27 +1340,27 @@ Spacer(modifier = Modifier.height(16.dp))
                         modifier = Modifier.fillMaxSize()
                     )
 
-                    // 2. Overlay Canvas for Bounding Boxes
+                    // 2. 繪製辨識外框的覆蓋畫布
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         val canvasW = size.width
                         val canvasH = size.height
 
                         detections.forEach { det ->
-                            // Coordinates from model are normalized 0..1
+                            // 來自模型的座標已正規化為 0..1
                             val left = det.x1 * canvasW
                             val top = det.y1 * canvasH
                             val right = det.x2 * canvasW
                             val bottom = det.y2 * canvasH
 
                             val strokeColor = if (det.isDanger) {
-                                Color(0xFFE57373) // Bright warnings red
+                                Color(0xFFE57373) // 危險警告亮紅色
                             } else {
-                                Color(0x8081C784) // Subtle green for safe
+                                Color(0x8081C784) // 安全半透明綠色
                             }
 
                             val strokeWidth = if (det.isDanger) 6f else 3f
 
-                            // Draw bounding box
+                            // 繪製邊界框
                             drawRoundRect(
                                 color = strokeColor,
                                 topLeft = androidx.compose.ui.geometry.Offset(left, top),
@@ -1354,7 +1371,7 @@ Spacer(modifier = Modifier.height(16.dp))
                         }
                     }
 
-                    // Top Bar overlaid on camera preview
+                    // 覆蓋於相機預覽上方的頂部列
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1362,7 +1379,7 @@ Spacer(modifier = Modifier.height(16.dp))
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Status Pill
+                        // 狀態膠囊指示標籤
                         Row(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(20.dp))
@@ -1373,9 +1390,9 @@ Spacer(modifier = Modifier.height(16.dp))
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(10.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFF81C784).copy(alpha = alphaAnim))
+                                .size(10.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF81C784).copy(alpha = alphaAnim))
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
@@ -1386,7 +1403,7 @@ Spacer(modifier = Modifier.height(16.dp))
                             )
                         }
 
-                        // Flashlight Toggle
+                        // 手電筒開關
                         IconButton(
                             onClick = {
                                 val currentCamera = camera
@@ -1423,7 +1440,7 @@ Spacer(modifier = Modifier.height(16.dp))
                     }
                 }
 
-                // Bottom Console & Alerts
+                // 下方控制台與警報
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1458,7 +1475,7 @@ Spacer(modifier = Modifier.height(16.dp))
     fontSize = 18.sp,
     fontWeight = FontWeight.Bold
 )
-                    // Danger indicator if any danger items detected
+                    // 若偵測到危險物件則顯示危險指示器
                     val dangerousItems = detections.filter { it.isDanger }
                     val closestDangerItem = dangerousItems.maxByOrNull { it.proximity }
                     if (closestDangerItem != null) {
@@ -1491,7 +1508,7 @@ Spacer(modifier = Modifier.height(16.dp))
                         }
                     }
 
-                    // Console / Log Panel (Glassmorphism style)
+                    // 控制台 / 日誌面板（毛玻璃風格）
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1739,7 +1756,7 @@ fun NavigationMap(
     val startPoint = pathLatLngs.firstOrNull()
     val endPoint = pathLatLngs.lastOrNull()
 
-    // Autocenter on current location if available, otherwise path start
+    // 若有目前位置則自動置中於目前位置，否則置中於路線起點
     LaunchedEffect(isMapLoaded, currentLatLng, startPoint) {
         if (!isMapLoaded) return@LaunchedEffect
         val target = currentLatLng ?: startPoint
@@ -1748,7 +1765,7 @@ fun NavigationMap(
         }
     }
 
-    // Auto fit bounds initially
+    // 初始自動縮放以容納所有座標範圍
     LaunchedEffect(isMapLoaded, pathLatLngs) {
         if (!isMapLoaded || pathLatLngs.isEmpty()) return@LaunchedEffect
         val boundsBuilder = com.google.android.gms.maps.model.LatLngBounds.Builder()
@@ -1883,7 +1900,7 @@ fun PermissionDeniedScreen(onRequestPermission: () -> Unit) {
 }
 
 /**
- * Rotates a bitmap by the specified degrees.
+ * 將 Bitmap 旋轉指定角度。
  */
 fun rotateBitmap(bitmap: Bitmap, degrees: Float): Bitmap {
     if (degrees == 0f) return bitmap

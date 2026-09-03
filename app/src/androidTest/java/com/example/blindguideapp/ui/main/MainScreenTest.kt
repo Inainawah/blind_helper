@@ -7,7 +7,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 
-/** UI tests for [com.example.blindguideapp.ui.main.MainScreen]. */
+/** [com.example.blindguideapp.ui.main.MainScreen] 的 UI 測試。 */
 class MainScreenTest {
 
   @get:Rule val composeTestRule = createAndroidComposeRule<ComponentActivity>()
