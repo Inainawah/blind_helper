@@ -35,7 +35,7 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
         10 to "消防栓", 11 to "停止標誌", 12 to "停車收費錶", 13 to "長椅",
         15 to "貓", 16 to "狗",
         24 to "背包", 25 to "雨傘", 26 to "手提包", 28 to "行李箱",
-        32 to "球類", 35 to "棒球手套", 36 to "滑板",
+        32 to "球類", 35 to "棒球手套",
         38 to "網球拍", 39 to "瓶子", 40 to "高腳杯", 41 to "杯子",
         56 to "椅子", 57 to "沙發", 58 to "盆栽", 60 to "餐桌",
         72 to "冰箱", 75 to "花瓶", 80 to "桌子"
@@ -48,7 +48,7 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
         10 to "fire hydrant", 11 to "stop sign", 12 to "parking meter", 13 to "bench",
         15 to "cat", 16 to "dog",
         24 to "backpack", 25 to "umbrella", 26 to "handbag", 28 to "suitcase",
-        32 to "sports ball", 35 to "baseball glove", 36 to "skateboard",
+        32 to "sports ball", 35 to "baseball glove",
         38 to "tennis racket", 39 to "bottle", 40 to "wine glass", 41 to "cup",
         56 to "chair", 57 to "couch", 58 to "potted plant", 60 to "dining table",
         72 to "refrigerator", 75 to "vase", 80 to "table"
@@ -75,7 +75,6 @@ class YoloDetector(private val context: Context, private val modelPath: String) 
         "suitcase" to 60500f,
         "sports ball" to 2500f,
         "baseball glove" to 5000f,
-        "skateboard" to 8000f,
         "tennis racket" to 6000f,
         "bottle" to 1300f,
         "wine glass" to 1500f,

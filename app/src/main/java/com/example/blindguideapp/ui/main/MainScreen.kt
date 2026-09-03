@@ -658,10 +658,10 @@ DisposableEffect(Unit) {
                 alertLogs.removeAt(alertLogs.size - 1)
             }
             val logMessage = if (isUrgent) {
-    "緊急警告: ${det.direction}有「$name」快速靠近"
-} else {
-    "危險警告: ${det.direction}有「$name」"
-}
+                "緊急警告: ${det.direction}有「$name」"
+            } else {
+                "危險警告: ${det.direction}有「$name」"
+            }
             alertLogs.add(0, AlertLog(System.currentTimeMillis(), logMessage, timeStamp))
 
             // 只有在導航進行中才把警報寫回後端，讓家屬模式能算出這趟導航的
