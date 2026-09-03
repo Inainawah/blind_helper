@@ -18,7 +18,7 @@ private val LightColorScheme =
     secondary = PurpleGrey40,
     tertiary = Pink40,
 
-    /* Other default colors to override
+    /* 其他可覆寫的預設顏色
     background = Color(0xFFFFFBFE),
     surface = Color(0xFFFFFBFE),
     onPrimary = Color.White,
@@ -32,7 +32,7 @@ private val LightColorScheme =
 @Composable
 fun BlindGuideAppTheme(
   darkTheme: Boolean = isSystemInDarkTheme(),
-  // Dynamic color is available on Android 12+
+  // 動態色彩支援 Android 12+
   dynamicColor: Boolean = true,
   content: @Composable () -> Unit,
 ) {

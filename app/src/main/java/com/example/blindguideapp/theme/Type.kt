@@ -6,7 +6,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
-// Set of Material typography styles to start with
+// Material 基礎字體排版樣式
 val Typography =
   Typography(
     bodyLarge =
@@ -17,7 +17,7 @@ val Typography =
         lineHeight = 24.sp,
         letterSpacing = 0.5.sp,
       )
-    /* Other default text styles to override
+    /* 其他可覆寫的預設文字樣式
     titleLarge = TextStyle(
         fontFamily = FontFamily.Default,
         fontWeight = FontWeight.Normal,
