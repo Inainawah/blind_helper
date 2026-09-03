@@ -440,6 +440,20 @@ DisposableEffect(Unit) {
         val result = navigationResult
         val navigationId = result?.navigation_id
         val userId = deviceProfile?.userId
+
+        // 使用者說出新目的地、開始下一趟導航之前，先把「上一趟還在進行中、
+        // 卻沒有人按過結束導航」的舊紀錄自動收尾（標記為 cancelled）。
+        // 沒有這一段的話，只要中途換講別的目的地，舊的那筆紀錄會永遠卡在
+        // 「進行中」、沒有結束時間，家屬模式看到的資料會一直不完整、
+        // 時長也會持續往上跳動（顯示成好像還在走，但其實早就不是這趟了）。
+        val previousNavigationId = currentNavigationId
+        if (previousNavigationId != null &&
+            previousNavigationId != navigationId &&
+            userId != null
+        ) {
+            finishNavigationSession(serverUrl, previousNavigationId, userId, "cancelled")
+        }
+
         currentNavigationId = navigationId
 
         // 通知後端這趟導航「開始了」，讓家屬模式看到的 started_at/status 正確
