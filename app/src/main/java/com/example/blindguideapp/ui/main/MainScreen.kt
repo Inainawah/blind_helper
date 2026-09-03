@@ -275,19 +275,22 @@ fun CameraDetectionLayout(
             override fun onStart(utteranceId: String?) {
                 if (utteranceId == "welcome_intro") {
                     isIntroSpeaking.set(true)
-                } else if (utteranceId != null && utteranceId.startsWith("voice_status_")) {
-                    isVoiceStatusSpeaking.set(true)
                 } else if (utteranceId != null && utteranceId.startsWith("turn_guide_")) {
                     isNavigationSpeaking.set(true)
                 }
+                // 注意：voice_status_ 開頭的語音狀態播報不在這裡設定
+                // isVoiceStatusSpeaking，而是由呼叫端（onResults）在呼叫
+                // handleVoiceCommand 整段流程前後直接設定，涵蓋整個「查詢/
+                // 規劃路線」流程（含中間的網路請求時間），而不是只有單一句
+                // 語音播放的時間——這樣才不會在兩句狀態播報之間出現空檔，
+                // 也不用擔心 tts?.speak() 呼叫下去到 onStart 真正觸發之間的
+                // 時間差讓警報有機可趁。
             }
 
             override fun onDone(utteranceId: String?) {
                 if (utteranceId == "welcome_intro") {
                     isIntroSpeaking.set(false)
                     lastAlertFinishedTime.set(System.currentTimeMillis() + 500L)
-                } else if (utteranceId != null && utteranceId.startsWith("voice_status_")) {
-                    isVoiceStatusSpeaking.set(false)
                 } else if (utteranceId != null) {
                     navigationUtteranceRegistry.remove(utteranceId)
                     if (utteranceId.startsWith("turn_guide_")) isNavigationSpeaking.set(false)
@@ -298,8 +301,6 @@ fun CameraDetectionLayout(
             override fun onError(utteranceId: String?) {
                 if (utteranceId == "welcome_intro") {
                     isIntroSpeaking.set(false)
-                } else if (utteranceId != null && utteranceId.startsWith("voice_status_")) {
-                    isVoiceStatusSpeaking.set(false)
                 } else if (utteranceId != null) {
                     navigationUtteranceRegistry.remove(utteranceId)
                     if (utteranceId.startsWith("turn_guide_")) isNavigationSpeaking.set(false)
@@ -309,8 +310,6 @@ fun CameraDetectionLayout(
             override fun onStop(utteranceId: String?, interrupted: Boolean) {
                 if (utteranceId == "welcome_intro") {
                     isIntroSpeaking.set(false)
-                } else if (utteranceId != null && utteranceId.startsWith("voice_status_")) {
-                    isVoiceStatusSpeaking.set(false)
                 }
                 // 導航語音被警報插播打斷（interrupted = true）：把同一句話重新排回去播放，
                 // 不會就這樣消失不見。如果連續被打斷好幾次（路口警報密集的情況），
@@ -428,11 +427,21 @@ DisposableEffect(Unit) {
                 if (!text.isNullOrBlank()) {
                     coroutineScope.launch {
                         val (lat, lng) = getCurrentLocation(context)
-                        handleVoiceCommand(context, text, serverUrl, lat, lng, deviceProfile?.userId, tts) { result ->
-                            navigationResult = result
-                            if (result != null || text.contains("哪裡") || text.contains("在哪")) {
-                                showNavigationTab = true
+                        // 提早在這裡就把保護旗標設成 true，不要等語音引擎真正觸發
+                        // onStart 才設定——tts?.speak() 呼叫下去到 onStart 實際觸發
+                        // 之間有一個短暫空檔，如果剛好在那個空檔內偵測到障礙物，
+                        // 警報還是有機會插進來，讓「正在規劃前往...」這句話講不完整。
+                        // 提早設定可以完全消除這個時間差。
+                        isVoiceStatusSpeaking.set(true)
+                        try {
+                            handleVoiceCommand(context, text, serverUrl, lat, lng, deviceProfile?.userId, tts) { result ->
+                                navigationResult = result
+                                if (result != null || text.contains("哪裡") || text.contains("在哪")) {
+                                    showNavigationTab = true
+                                }
                             }
+                        } finally {
+                            isVoiceStatusSpeaking.set(false)
                         }
                     }
                 }
