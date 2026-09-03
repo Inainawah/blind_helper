@@ -230,6 +230,13 @@ fun CameraDetectionLayout(
     // 避免剛開 App 就被障礙物警報（尤其是 QUEUE_FLUSH 緊急警報）直接截斷中斷。
     val isIntroSpeaking = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
 
+    // 使用者說出語音指令後，「正在查詢您目前的位置...」「正在規劃前往...的路線...」
+    // 「規劃成功...」這幾句狀態播報正在講的時候是 true；原本這幾句沒有被保護，
+    // 如果剛好在使用者講完指令的當下偵測到障礙物，這句話會被警報直接截斷、
+    // 講不完整，使用者會漏聽路線到底規劃成功還是失敗。跟開場介紹語音用同一套
+    // 保護邏輯：播放期間暫停處理相機障礙物警報。
+    val isVoiceStatusSpeaking = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+
     LaunchedEffect(ttsInitialized) {
         if (ttsInitialized) {
             isIntroSpeaking.set(true)
@@ -268,6 +275,8 @@ fun CameraDetectionLayout(
             override fun onStart(utteranceId: String?) {
                 if (utteranceId == "welcome_intro") {
                     isIntroSpeaking.set(true)
+                } else if (utteranceId != null && utteranceId.startsWith("voice_status_")) {
+                    isVoiceStatusSpeaking.set(true)
                 } else if (utteranceId != null && utteranceId.startsWith("turn_guide_")) {
                     isNavigationSpeaking.set(true)
                 }
@@ -277,6 +286,8 @@ fun CameraDetectionLayout(
                 if (utteranceId == "welcome_intro") {
                     isIntroSpeaking.set(false)
                     lastAlertFinishedTime.set(System.currentTimeMillis() + 500L)
+                } else if (utteranceId != null && utteranceId.startsWith("voice_status_")) {
+                    isVoiceStatusSpeaking.set(false)
                 } else if (utteranceId != null) {
                     navigationUtteranceRegistry.remove(utteranceId)
                     if (utteranceId.startsWith("turn_guide_")) isNavigationSpeaking.set(false)
@@ -287,6 +298,8 @@ fun CameraDetectionLayout(
             override fun onError(utteranceId: String?) {
                 if (utteranceId == "welcome_intro") {
                     isIntroSpeaking.set(false)
+                } else if (utteranceId != null && utteranceId.startsWith("voice_status_")) {
+                    isVoiceStatusSpeaking.set(false)
                 } else if (utteranceId != null) {
                     navigationUtteranceRegistry.remove(utteranceId)
                     if (utteranceId.startsWith("turn_guide_")) isNavigationSpeaking.set(false)
@@ -296,6 +309,8 @@ fun CameraDetectionLayout(
             override fun onStop(utteranceId: String?, interrupted: Boolean) {
                 if (utteranceId == "welcome_intro") {
                     isIntroSpeaking.set(false)
+                } else if (utteranceId != null && utteranceId.startsWith("voice_status_")) {
+                    isVoiceStatusSpeaking.set(false)
                 }
                 // 導航語音被警報插播打斷（interrupted = true）：把同一句話重新排回去播放，
                 // 不會就這樣消失不見。如果連續被打斷好幾次（路口警報密集的情況），
@@ -580,7 +595,7 @@ DisposableEffect(Unit) {
 
     // 偵測到危險時觸發語音與紀錄（優先級與搶佔邏輯）
     LaunchedEffect(detections) {
-        if (!ttsInitialized || isIntroSpeaking.get()) return@LaunchedEffect
+        if (!ttsInitialized || isIntroSpeaking.get() || isVoiceStatusSpeaking.get()) return@LaunchedEffect
 
         // 追蹤偵測物件並取得面積變化率
         val trackedResults = tracker.update(detections)
@@ -2249,19 +2264,23 @@ suspend fun handleVoiceCommand(
     tts: TextToSpeech?,
     onDirectionsResult: (DirectionsResponse?) -> Unit
 ) {
+    // 注意：這幾句狀態播報的 utteranceId 統一用 "voice_status_" 開頭，
+    // 讓 UtteranceProgressListener 認得出來、播放期間暫停處理相機障礙物警報
+    // （見 isVoiceStatusSpeaking），避免使用者剛講完指令，下一秒就被警報
+    // 直接截斷、講不完整（例如「正在規劃前往...」講到一半被切掉）。
     if (text.contains("哪裡") || text.contains("在哪")) {
-        tts?.speak("正在查詢您目前的位置...", TextToSpeech.QUEUE_FLUSH, null, "reverse_geocode_start")
+        tts?.speak("正在查詢您目前的位置...", TextToSpeech.QUEUE_FLUSH, null, "voice_status_reverse_geocode_start")
         val address = requestReverseGeocode(serverUrl, lat, lng)
-        tts?.speak("您目前的位置是：$address", TextToSpeech.QUEUE_ADD, null, "reverse_geocode_result")
+        tts?.speak("您目前的位置是：$address", TextToSpeech.QUEUE_ADD, null, "voice_status_reverse_geocode_result")
         onDirectionsResult(null)
     } else {
-        tts?.speak("正在規劃前往 $text 的路線...", TextToSpeech.QUEUE_FLUSH, null, "directions_start")
+        tts?.speak("正在規劃前往 $text 的路線...", TextToSpeech.QUEUE_FLUSH, null, "voice_status_directions_start")
         val response = requestDirections(serverUrl, lat, lng, text, userId)
         if (response.success) {
             val distanceStr = response.distance ?: ""
             val durationStr = response.duration ?: ""
             val summary = "規劃成功。全程約 ${distanceStr}，需要 ${durationStr}，開始導航後會依照您的位置提醒轉彎。"
-            tts?.speak(summary, TextToSpeech.QUEUE_ADD, null, "directions_success")
+            tts?.speak(summary, TextToSpeech.QUEUE_ADD, null, "voice_status_directions_success")
 
             // 注意：這裡不再把所有步驟一次念完。
             // 逐步的轉彎提示改由 TurnByTurnGuide（三階段轉彎提示模組）
@@ -2269,7 +2288,7 @@ suspend fun handleVoiceCommand(
             onDirectionsResult(response)
         } else {
             val errorMsg = "導航規劃失敗，原因為 ${response.message ?: "未知錯誤"}"
-            tts?.speak(errorMsg, TextToSpeech.QUEUE_FLUSH, null, "directions_fail")
+            tts?.speak(errorMsg, TextToSpeech.QUEUE_FLUSH, null, "voice_status_directions_fail")
             onDirectionsResult(response)
         }
     }
