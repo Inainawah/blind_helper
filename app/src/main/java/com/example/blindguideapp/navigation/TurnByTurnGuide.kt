@@ -3,13 +3,12 @@ package com.example.blindguideapp.navigation
 import kotlin.math.abs
 
 /**
- * 視障導航三階段轉彎提示核心邏輯。
+ * 視障導航兩階段轉彎提示核心邏輯。
  *
  * 每個 [GuideStep] 對應 Routes/Directions API 的一個 step。以「目前位置」到
  * step.end（下一個轉折點）的距離為準，觸發：
  *   1. 預告階段（15 公尺）：語音預告
- *   2. 觸覺準備階段（5 公尺）：語音 + 提示使用導盲杖確認地面特徵
- *   3. 轉彎觸發點（2~3 公尺）：短震動兩下 + 「現在 [方向]」
+ *   2. 轉彎準備/觸發階段（5 公尺）：短震動兩下 + 語音提示使用導盲杖確認地面特徵
  *
  * 方向詞（前後左右）在每個階段「即時」依據當下手機朝向重新計算，而不是只算
  * 一次，因為使用者行走中身體朝向會持續改變，這正是本模組相對於單純播報
@@ -45,7 +44,7 @@ class TurnByTurnGuide(
         val maneuver: String? = null
     )
 
-    private enum class Stage { NONE, ANNOUNCED_PRE, ANNOUNCED_PREPARE, TRIGGERED }
+    private enum class Stage { NONE, ANNOUNCED_PRE, TRIGGERED }
 
     private var currentIndex = 0
     private var stage = Stage.NONE
@@ -134,25 +133,18 @@ class TurnByTurnGuide(
         val phrase = DirectionTranslator.relativeDirectionPhrase(deltaToPhone)
 
         when {
-            distanceToTurn <= TRIGGER_MAX_M && stage != Stage.TRIGGERED -> {
+            distanceToTurn <= TRIGGER_M && stage != Stage.TRIGGERED -> {
                 stage = Stage.TRIGGERED
                 distanceAtTriggerM = distanceToTurn
                 triggeredAtMs = System.currentTimeMillis()
                 vibrateShort()
-                speak("現在$phrase", true)
-                targetBearingAfterTurn = nextBearing
-                awaitingTurnConfirmation = true
-                turnConfirmStableSinceMs = 0L
-            }
-
-            distanceToTurn <= PREPARE_M && stage == Stage.ANNOUNCED_PRE -> {
-                stage = Stage.ANNOUNCED_PREPARE
                 // 語音限制：單次播報不超過 15 字，即使方向詞是最長的
                 // 「向左前方走／向右前方走」（5 字）也要留在字數限制內。
                 // flush 一律用 true：導航語音要絕對優先，不能被警報排隊卡住
-                // （警報本身已經有獨立的「不打斷導航」規則，這裡改成導航
-                // 主動清開警報佇列，兩邊互相配合才能保證導航一定準時講）。
                 speak("5公尺後$phrase，留意路面", true)
+                targetBearingAfterTurn = nextBearing
+                awaitingTurnConfirmation = true
+                turnConfirmStableSinceMs = 0L
             }
 
             distanceToTurn <= PRE_M && stage == Stage.NONE -> {
@@ -162,7 +154,7 @@ class TurnByTurnGuide(
         }
 
         // 備援機制一（通用）：如果使用者已進入 15 公尺範圍內，且當下距離比這段路程中達到的最小距離還遠 4 公尺以上，
-        // 代表使用者已經走過或繞過該轉向點，為了防定位誤差漏掉 3m 的 TRIGGERED 判定而卡住，此時應直接進入下一步。
+        // 代表使用者已經走過或繞過該轉向點，為了防定位誤差而卡住，此時應直接進入下一步。
         val hasMovedPastTurnGeneral = minDistanceObserved <= PRE_M &&
                 (distanceToTurn - minDistanceObserved >= MOVED_PAST_TURN_M)
 
@@ -248,11 +240,6 @@ class TurnByTurnGuide(
                 return
             }
 
-            distanceToDestination <= PREPARE_M && stage == Stage.ANNOUNCED_PRE -> {
-                stage = Stage.ANNOUNCED_PREPARE
-                speak("即將抵達目的地，目的地在您的$phrase，請放慢腳步", true)
-            }
-
             distanceToDestination <= PRE_M && stage == Stage.NONE -> {
                 stage = Stage.ANNOUNCED_PRE
                 speak("前方 15 公尺處即為目的地，在您的$phrase", true)
@@ -260,7 +247,7 @@ class TurnByTurnGuide(
         }
 
         // 備援機制一：已經進入過目的地 15 公尺範圍內、又比觀測過的最小距離
-        // 遠了 4 公尺以上，代表已經走過頭或繞開了，不需要精準落在 6 公尺內。
+        // 遠了 4 公尺以上，代表已經走過頭或繞開了，不需要精準落在 5 公尺內。
         val hasMovedPastDestination = minDistanceObserved <= PRE_M &&
             (distanceToDestination - minDistanceObserved >= MOVED_PAST_TURN_M)
 
@@ -281,9 +268,8 @@ class TurnByTurnGuide(
 
     companion object {
         const val PRE_M = 15.0
-        const val PREPARE_M = 5.0
-        const val TRIGGER_MAX_M = 3.0
-        const val FINAL_ARRIVAL_THRESHOLD_M = 6.0
+        const val TRIGGER_M = 5.0
+        const val FINAL_ARRIVAL_THRESHOLD_M = 5.0
 
         // 走過轉角判定用的「相對移動距離」，故意設得比單純的絕對座標門檻寬鬆，
         // 才不會被手機 GPS 常見的數公尺誤差卡住。
