@@ -8,7 +8,7 @@ import kotlin.math.abs
  * 每個 [GuideStep] 對應 Routes/Directions API 的一個 step。以「目前位置」到
  * step.end（下一個轉折點）的距離為準，觸發：
  *   1. 預告階段（15 公尺）：語音預告
- *   2. 轉彎觸發點（5 公尺）：短震動兩下 + 「現在 [方向]」
+ *   2. 轉彎準備/觸發階段（5 公尺）：短震動兩下 + 語音提示（含方向與留意路面）
  *
  * 原本還有第三階段「2~3 公尺內才真正觸發轉彎」，但實測發現手機 GPS 精準度
  * 常有 15~36 公尺的誤差，門檻訂得太緊反而讓使用者明明已經走到路口、甚至
@@ -140,8 +140,8 @@ class TurnByTurnGuide(
 
         when {
             // 5 公尺這個階段本身就是轉彎的實際觸發點（原本 3 公尺那層已經拿掉，
-            // 見類別註解說明）：短震動 + 「現在 [方向]」，同時開始等指南針確認
-            // 轉身、或後面的走遠了/逾時備援機制。
+            // 見類別註解說明）：短震動 + 語音，同時開始等指南針確認轉身、
+            // 或後面的走遠了/逾時備援機制。
             distanceToTurn <= PREPARE_M && stage != Stage.TRIGGERED -> {
                 stage = Stage.TRIGGERED
                 distanceAtTriggerM = distanceToTurn
@@ -152,7 +152,7 @@ class TurnByTurnGuide(
                 // flush 一律用 true：導航語音要絕對優先，不能被警報排隊卡住
                 // （警報本身已經有獨立的「不打斷導航」規則，這裡改成導航
                 // 主動清開警報佇列，兩邊互相配合才能保證導航一定準時講）。
-                speak("現在$phrase", true)
+                speak("現在$phrase，留意路面", true)
                 targetBearingAfterTurn = nextBearing
                 awaitingTurnConfirmation = true
                 turnConfirmStableSinceMs = 0L
@@ -165,7 +165,7 @@ class TurnByTurnGuide(
         }
 
         // 備援機制一（通用）：如果使用者已進入 15 公尺範圍內，且當下距離比這段路程中達到的最小距離還遠 4 公尺以上，
-        // 代表使用者已經走過或繞過該轉向點，為了防定位誤差漏掉 3m 的 TRIGGERED 判定而卡住，此時應直接進入下一步。
+        // 代表使用者已經走過或繞過該轉向點，為了防定位誤差而卡住，此時應直接進入下一步。
         val hasMovedPastTurnGeneral = minDistanceObserved <= PRE_M &&
                 (distanceToTurn - minDistanceObserved >= MOVED_PAST_TURN_M)
 
