@@ -47,11 +47,17 @@ function isValidPairingCode(value) {
  * 是一個固定不變的數字，不會隨著實際走了多久而更新，家屬中途查看時看到
  * 的內容跟真實進度無關，容易誤會成「走了這麼久」。
  *
- * 改成：導航還在進行中時，直接用「現在時間 - started_at」即時算出真正
- * 已經走了多久，家屬不用等視障使用者按下「結束導航」，隨時查看都能看到
- * 正確、會持續增加的進行中時長。
+ * 進行中的時長，改成用「開始時間」到「最後一次收到座標回報的時間」
+ * （lastLocationAt，App 導航中每隔一段時間就會回報一次目前座標）來算，
+ * 而不是直接拿「現在時間」去算。這樣才是真正的「走了多久」，而不是
+ * 「這筆紀錄存在多久」——如果這趟導航中途被放棄（例如中途換講別的目的地
+ * 卻沒觸發自動收尾、或 App 直接被關掉），不會再有新的座標回報進來，
+ * 時長就會停在最後一次收到座標的時間點，不會無限往上跳。真的還在走的
+ * 時候，因為每隔幾十秒就有新座標回報，算出來的時長還是很接近即時。
+ * 完全沒有座標可用時（例如導航剛開始、還沒來得及回報過半個座標點），
+ * 才退回用「現在時間」當一個粗略的估計。
  */
-function resolveDisplayDurationSeconds(row) {
+function resolveDisplayDurationSeconds(row, lastLocationAt) {
     // actual_duration_seconds 有值且 > 0，代表 /finish 有正常算出實際時長。
     if (row.actual_duration_seconds != null && row.actual_duration_seconds > 0) {
         return row.actual_duration_seconds;
@@ -65,10 +71,13 @@ function resolveDisplayDurationSeconds(row) {
         if (fallback > 0) return fallback;
     }
 
-    // 導航正在進行中：即時算出已經過了多久。
+    // 導航正在進行中：算出「開始」到「最後一次收到座標回報」之間過了多久。
     if (row.status === "active" && (row.started_at || row.created_at)) {
         const startTime = new Date(row.started_at || row.created_at).getTime();
-        const elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
+        const referenceTime = lastLocationAt
+            ? new Date(lastLocationAt).getTime()
+            : Date.now();
+        const elapsedSeconds = Math.floor((referenceTime - startTime) / 1000);
         if (elapsedSeconds >= 0) return elapsedSeconds;
     }
 
@@ -306,7 +315,12 @@ router.get("/family/navigation-history", async (req, res) => {
                 nr.distance_meters, nr.duration_seconds,
                 nr.actual_distance_meters, nr.actual_duration_seconds,
                 nr.status, nr.started_at, nr.ended_at, nr.created_at,
-                COUNT(od.detection_id) AS alert_count
+                COUNT(od.detection_id) AS alert_count,
+                (
+                    SELECT MAX(ll.recorded_at)
+                    FROM location_logs ll
+                    WHERE ll.navigation_id = nr.navigation_id
+                ) AS last_location_at
              FROM navigation_records nr
              LEFT JOIN object_detections od ON od.navigation_id = nr.navigation_id
              WHERE nr.user_id = ?
@@ -324,7 +338,7 @@ router.get("/family/navigation-history", async (req, res) => {
                 start_address: row.start_address,
                 end_address: row.end_address,
                 distance_meters: row.actual_distance_meters ?? row.distance_meters,
-                duration_seconds: resolveDisplayDurationSeconds(row),
+                duration_seconds: resolveDisplayDurationSeconds(row, row.last_location_at),
                 alert_count: Number(row.alert_count),
                 status: row.status,
                 started_at: row.started_at,
@@ -460,7 +474,10 @@ router.get("/family/navigation-history/:navigation_id", async (req, res) => {
                         ? { lat: Number(record.end_latitude), lng: Number(record.end_longitude) }
                         : null,
                 distance_meters: record.actual_distance_meters ?? record.distance_meters,
-                duration_seconds: resolveDisplayDurationSeconds(record),
+                duration_seconds: resolveDisplayDurationSeconds(
+                    record,
+                    locationRows[locationRows.length - 1]?.recorded_at
+                ),
                 status: record.status,
                 started_at: record.started_at,
                 ended_at: record.ended_at
