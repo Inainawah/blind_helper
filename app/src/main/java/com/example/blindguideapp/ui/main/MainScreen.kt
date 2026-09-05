@@ -2324,8 +2324,8 @@ suspend fun handleVoiceCommand(
     if (text.contains("哪裡") || text.contains("在哪")) {
         tts?.speak("正在查詢您目前的位置...", TextToSpeech.QUEUE_FLUSH, null, "voice_status_reverse_geocode_start")
         val address = requestReverseGeocode(serverUrl, lat, lng)
-        speakAndAwait("您目前的位置是：$address", false, "voice_status_reverse_geocode_result")
         onDirectionsResult(null)
+        speakAndAwait("您目前的位置是：$address", false, "voice_status_reverse_geocode_result")
     } else {
         tts?.speak("正在規劃前往 $text 的路線...", TextToSpeech.QUEUE_FLUSH, null, "voice_status_directions_start")
         val response = requestDirections(serverUrl, lat, lng, text, userId)
@@ -2333,16 +2333,18 @@ suspend fun handleVoiceCommand(
             val distanceStr = response.distance ?: ""
             val durationStr = response.duration ?: ""
             val summary = "規劃成功。全程約 ${distanceStr}，需要 ${durationStr}，開始導航後會依照您的位置提醒轉彎。"
-            speakAndAwait(summary, false, "voice_status_directions_success")
 
-            // 注意：這裡不再把所有步驟一次念完。
-            // 逐步的轉彎提示改由 TurnByTurnGuide（三階段轉彎提示模組）
-            // 在使用者實際走到定點時才播報，避免規劃完路線就把整趟路念過一遍。
+            // 注意：地圖/路線畫面要先更新，不要等語音講完才顯示——語音講完
+            // 才觸發畫面更新的話，使用者會覺得「講完之後要等一下才跑出來」，
+            // 畫面應該立刻跟語音同時出現，語音講完與否不該影響畫面顯示時機。
+            // 這裡也不再把所有步驟一次念完，逐步的轉彎提示改由 TurnByTurnGuide
+            // （三階段轉彎提示模組）在使用者實際走到定點時才播報。
             onDirectionsResult(response)
+            speakAndAwait(summary, false, "voice_status_directions_success")
         } else {
             val errorMsg = "導航規劃失敗，原因為 ${response.message ?: "未知錯誤"}"
-            speakAndAwait(errorMsg, true, "voice_status_directions_fail")
             onDirectionsResult(response)
+            speakAndAwait(errorMsg, true, "voice_status_directions_fail")
         }
     }
 }
