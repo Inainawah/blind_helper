@@ -35,8 +35,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import com.google.android.gms.location.LocationServices
@@ -238,6 +238,15 @@ fun CameraDetectionLayout(
     // 保護邏輯：播放期間暫停處理相機障礙物警報。
     val isVoiceStatusSpeaking = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
 
+    // utteranceId -> 「這句話真正講完（不管成功/失敗/被打斷）」的完成訊號。
+    // 原本用「輪詢 tts?.isSpeaking」判斷語音狀態播報有沒有講完，但兩句話交接
+    // 的瞬間這個狀態可能會有短暫空隙（TTS 引擎回報不夠即時），警報就是抓準
+    // 這個空隙插進來，導致像「全程需要...」這種第二句話開頭被截斷。改成明確
+    // 註冊「我要等這個 utteranceId 講完」，由 onDone/onError/onStop 完成訊號，
+    // 不再依賴猜測時序。
+    val utteranceCompletionSignals =
+        remember { java.util.concurrent.ConcurrentHashMap<String, CompletableDeferred<Unit>>() }
+
     LaunchedEffect(ttsInitialized) {
         if (ttsInitialized) {
             isIntroSpeaking.set(true)
@@ -254,6 +263,14 @@ fun CameraDetectionLayout(
     }
 
     DisposableEffect(Unit) {
+        // 幫 utteranceCompletionSignals 裡「有人在等這句話講完」的項目送出完成訊號，
+        // 不管這句話是正常講完、講到一半出錯、還是被警報插播打斷，只要引擎回報
+        // 這句話已經結束了，等待中的協程就該解除等待，不要一直卡住。
+        fun completeUtteranceSignal(utteranceId: String?) {
+            if (utteranceId == null) return
+            utteranceCompletionSignals.remove(utteranceId)?.complete(Unit)
+        }
+
         lateinit var ttsEngine: TextToSpeech
         ttsEngine = TextToSpeech(context) { status ->
             // 這個 callback 才是「語音引擎真正綁定完成」的時間點，
@@ -289,6 +306,7 @@ fun CameraDetectionLayout(
             }
 
             override fun onDone(utteranceId: String?) {
+                completeUtteranceSignal(utteranceId)
                 if (utteranceId == "welcome_intro") {
                     isIntroSpeaking.set(false)
                     lastAlertFinishedTime.set(System.currentTimeMillis() + 500L)
@@ -300,6 +318,7 @@ fun CameraDetectionLayout(
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
+                completeUtteranceSignal(utteranceId)
                 if (utteranceId == "welcome_intro") {
                     isIntroSpeaking.set(false)
                 } else if (utteranceId != null) {
@@ -309,6 +328,7 @@ fun CameraDetectionLayout(
             }
 
             override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                completeUtteranceSignal(utteranceId)
                 if (utteranceId == "welcome_intro") {
                     isIntroSpeaking.set(false)
                 }
@@ -435,22 +455,28 @@ DisposableEffect(Unit) {
                         // 提早設定可以完全消除這個時間差。
                         isVoiceStatusSpeaking.set(true)
                         try {
-                            handleVoiceCommand(context, text, serverUrl, lat, lng, deviceProfile?.userId, tts) { result ->
+                            handleVoiceCommand(
+                                context, text, serverUrl, lat, lng, deviceProfile?.userId, tts,
+                                speakAndAwait = { speakText, flush, utteranceId ->
+                                    // 一定要先註冊「等它講完」的訊號，再呼叫 tts?.speak()，
+                                    // 順序不能反過來——如果先講、才註冊訊號，語音有可能講完
+                                    // 得比註冊還快，訊號就會漏接，導致白白多等滿 15 秒逾時。
+                                    val signal = CompletableDeferred<Unit>()
+                                    utteranceCompletionSignals[utteranceId] = signal
+                                    tts?.speak(
+                                        speakText,
+                                        if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
+                                        null,
+                                        utteranceId
+                                    )
+                                    withTimeoutOrNull(15000L) { signal.await() }
+                                    utteranceCompletionSignals.remove(utteranceId)
+                                }
+                            ) { result ->
                                 navigationResult = result
                                 if (result != null || text.contains("哪裡") || text.contains("在哪")) {
                                     showNavigationTab = true
                                 }
-                            }
-                            // handleVoiceCommand 呼叫 tts?.speak() 都是「呼叫下去就馬上
-                            // 返回」，不會等語音真的講完——如果網路回應很快，這裡可能在
-                            // 「正在規劃前往...」都還沒講完的時候就執行到這一行，太早解除
-                            // 保護的話，警報還是有機會把話講到一半的內容截斷。這裡改成
-                            // 實際去等 TTS 引擎講完排隊的所有內容，才真正解除保護（設一個
-                            // 15 秒上限，避免萬一 TTS 狀態卡住就永遠不解除保護）。
-                            var waitedMs = 0
-                            while (tts?.isSpeaking == true && waitedMs < 15000) {
-                                delay(200)
-                                waitedMs += 200
                             }
                         } finally {
                             isVoiceStatusSpeaking.set(false)
@@ -2283,16 +2309,22 @@ suspend fun handleVoiceCommand(
     lng: Double,
     userId: Int?,
     tts: TextToSpeech?,
+    speakAndAwait: suspend (text: String, flush: Boolean, utteranceId: String) -> Unit,
     onDirectionsResult: (DirectionsResponse?) -> Unit
 ) {
     // 注意：這幾句狀態播報的 utteranceId 統一用 "voice_status_" 開頭，
     // 讓 UtteranceProgressListener 認得出來、播放期間暫停處理相機障礙物警報
     // （見 isVoiceStatusSpeaking），避免使用者剛講完指令，下一秒就被警報
     // 直接截斷、講不完整（例如「正在規劃前往...」講到一半被切掉）。
+    //
+    // 每個分支最後一句話改用 speakAndAwait，明確等待這句話真的播完，才讓
+    // 這個函式返回——原本呼叫端只是「輪詢 tts?.isSpeaking」，但兩句話交接
+    // 的瞬間這個狀態可能會有短暫空隙，警報就是抓準這個空隙插進來（實測發現
+    // 「規劃成功。全程約...需要...」這句話開頭常常剛好被截斷）。
     if (text.contains("哪裡") || text.contains("在哪")) {
         tts?.speak("正在查詢您目前的位置...", TextToSpeech.QUEUE_FLUSH, null, "voice_status_reverse_geocode_start")
         val address = requestReverseGeocode(serverUrl, lat, lng)
-        tts?.speak("您目前的位置是：$address", TextToSpeech.QUEUE_ADD, null, "voice_status_reverse_geocode_result")
+        speakAndAwait("您目前的位置是：$address", false, "voice_status_reverse_geocode_result")
         onDirectionsResult(null)
     } else {
         tts?.speak("正在規劃前往 $text 的路線...", TextToSpeech.QUEUE_FLUSH, null, "voice_status_directions_start")
@@ -2301,7 +2333,7 @@ suspend fun handleVoiceCommand(
             val distanceStr = response.distance ?: ""
             val durationStr = response.duration ?: ""
             val summary = "規劃成功。全程約 ${distanceStr}，需要 ${durationStr}，開始導航後會依照您的位置提醒轉彎。"
-            tts?.speak(summary, TextToSpeech.QUEUE_ADD, null, "voice_status_directions_success")
+            speakAndAwait(summary, false, "voice_status_directions_success")
 
             // 注意：這裡不再把所有步驟一次念完。
             // 逐步的轉彎提示改由 TurnByTurnGuide（三階段轉彎提示模組）
@@ -2309,7 +2341,7 @@ suspend fun handleVoiceCommand(
             onDirectionsResult(response)
         } else {
             val errorMsg = "導航規劃失敗，原因為 ${response.message ?: "未知錯誤"}"
-            tts?.speak(errorMsg, TextToSpeech.QUEUE_FLUSH, null, "voice_status_directions_fail")
+            speakAndAwait(errorMsg, true, "voice_status_directions_fail")
             onDirectionsResult(response)
         }
     }
