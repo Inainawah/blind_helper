@@ -35,6 +35,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
@@ -439,6 +440,17 @@ DisposableEffect(Unit) {
                                 if (result != null || text.contains("哪裡") || text.contains("在哪")) {
                                     showNavigationTab = true
                                 }
+                            }
+                            // handleVoiceCommand 呼叫 tts?.speak() 都是「呼叫下去就馬上
+                            // 返回」，不會等語音真的講完——如果網路回應很快，這裡可能在
+                            // 「正在規劃前往...」都還沒講完的時候就執行到這一行，太早解除
+                            // 保護的話，警報還是有機會把話講到一半的內容截斷。這裡改成
+                            // 實際去等 TTS 引擎講完排隊的所有內容，才真正解除保護（設一個
+                            // 15 秒上限，避免萬一 TTS 狀態卡住就永遠不解除保護）。
+                            var waitedMs = 0
+                            while (tts?.isSpeaking == true && waitedMs < 15000) {
+                                delay(200)
+                                waitedMs += 200
                             }
                         } finally {
                             isVoiceStatusSpeaking.set(false)
