@@ -568,12 +568,18 @@ DisposableEffect(Unit) {
                 val utteranceId = "turn_guide_${System.currentTimeMillis()}"
                 // 記錄下來，如果這句話被相機警報中途打斷，才有辦法在警報講完後補講一次。
                 navigationUtteranceRegistry[utteranceId] = PendingNavigationSpeech(text, interruptedCount = 0)
-                tts?.speak(
-                    text,
-                    if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
-                    null,
-                    utteranceId
-                )
+                // 「查詢位置/規劃路線」狀態播報還在講的時候（例如「規劃成功。全程
+                // 約...需要...」還沒講完），導航這裡改用排隊接在後面講，不要用
+                // 強制插播——不然導航一啟動就馬上講「請先...開始這趟導航」，
+                // 會直接蓋掉還在排隊的規劃結果播報，讓使用者聽不完整。
+                val effectiveQueueMode = if (isVoiceStatusSpeaking.get()) {
+                    TextToSpeech.QUEUE_ADD
+                } else if (flush) {
+                    TextToSpeech.QUEUE_FLUSH
+                } else {
+                    TextToSpeech.QUEUE_ADD
+                }
+                tts?.speak(text, effectiveQueueMode, null, utteranceId)
             },
             vibrateShort = { guidanceVibrator.shortDoubleBuzz() },
             onCompleted = {
