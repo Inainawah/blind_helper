@@ -147,12 +147,15 @@ class TurnByTurnGuide(
                 distanceAtTriggerM = distanceToTurn
                 triggeredAtMs = System.currentTimeMillis()
                 vibrateShort()
+                // 不加「現在」或「前方」這種時間感的詞，單純講方向本身
+                // （例如「向右轉，留意路面」），避免使用者覺得「叫我馬上
+                // 轉但根本還沒到」，也不用另外判斷距離選字。
                 // 語音限制：單次播報不超過 15 字，即使方向詞是最長的
                 // 「向左前方走／向右前方走」（5 字）也要留在字數限制內。
                 // flush 一律用 true：導航語音要絕對優先，不能被警報排隊卡住
                 // （警報本身已經有獨立的「不打斷導航」規則，這裡改成導航
                 // 主動清開警報佇列，兩邊互相配合才能保證導航一定準時講）。
-                speak("現在$phrase，留意路面", true)
+                speak("$phrase，留意路面", true)
                 targetBearingAfterTurn = nextBearing
                 awaitingTurnConfirmation = true
                 turnConfirmStableSinceMs = 0L
@@ -242,10 +245,11 @@ class TurnByTurnGuide(
         }
 
         when {
-            // 5 公尺這個階段本身就是抵達的實際判定點（原本 6 公尺那層已經拿掉，
-            // 理由跟轉彎點一樣：門檻訂太緊，GPS 誤差會讓使用者明明已經到了，
-            // App 卻遲遲不判定抵達）。
-            distanceToDestination <= PREPARE_M && stage != Stage.TRIGGERED -> {
+            // 抵達判定獨立用 ARRIVAL_TRIGGER_M（10 公尺），不跟轉彎共用 PREPARE_M
+            // （5 公尺）——抵達是整趟導航的最後一步，沒有後面的路段可以補救，
+            // GPS 誤差常常讓使用者明明已經到了，距離卻沒辦法精準低於 5 公尺，
+            // 所以這裡刻意放寬一點，換取「講得出來」優先於「精準到公尺等級」。
+            distanceToDestination <= ARRIVAL_TRIGGER_M && stage != Stage.TRIGGERED -> {
                 stage = Stage.TRIGGERED
                 vibrateShort()
                 speak("您已抵達目的地附近，目的地在您的$phrase，導航結束", true)
@@ -261,7 +265,7 @@ class TurnByTurnGuide(
         }
 
         // 備援機制一：已經進入過目的地 15 公尺範圍內、又比觀測過的最小距離
-        // 遠了 4 公尺以上，代表已經走過頭或繞開了，不需要精準落在 5 公尺內。
+        // 遠了 4 公尺以上，代表已經走過頭或繞開了，不需要精準落在 10 公尺內。
         val hasMovedPastDestination = minDistanceObserved <= PRE_M &&
             (distanceToDestination - minDistanceObserved >= MOVED_PAST_TURN_M)
 
@@ -288,6 +292,12 @@ class TurnByTurnGuide(
         // GPS 精準度常有 15~36 公尺誤差，門檻訂太緊反而讓使用者明明已經
         // 走到路口/目的地，App 卻遲遲不觸發，所以拿掉了那一層）。
         const val PREPARE_M = 5.0
+
+        // 抵達目的地判定用的門檻，獨立於 PREPARE_M（轉彎用的 5 公尺），
+        // 刻意放寬到 10 公尺——抵達是整趟導航最後一步，沒有後面路段可以
+        // 補救，GPS 誤差常讓距離沒辦法精準低於 5 公尺，寧可讓「講得出來」
+        // 優先於「精準到公尺等級」。
+        const val ARRIVAL_TRIGGER_M = 10.0
 
         // 走過轉角判定用的「相對移動距離」，故意設得比單純的絕對座標門檻寬鬆，
         // 才不會被手機 GPS 常見的數公尺誤差卡住。
