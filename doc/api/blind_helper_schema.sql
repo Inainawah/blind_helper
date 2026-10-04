@@ -281,3 +281,97 @@ ALTER TABLE object_detections
 
 CREATE INDEX idx_device_profiles_pairing_code ON device_profiles(pairing_code);
 CREATE INDEX idx_object_detections_navigation ON object_detections(navigation_id);
+
+-- =========================================================
+-- 導航紀錄狀態追蹤（新增，增量開發，不影響上方既有欄位）
+-- 對應 backend/server.js 導航開始／結束 API，以及
+-- backend/family_pairing.js 的顯示時長計算（resolveDisplayDurationSeconds）
+-- =========================================================
+
+-- navigation_records 新增欄位：distance_meters / duration_seconds 是 Google
+-- Directions 一開始「規劃路線」時估出來的預估值，跟使用者實際走了多遠、
+-- 走了多久不一定相符（使用者可能中途繞路、中途放棄），所以另外用
+-- actual_distance_meters / actual_duration_seconds 記錄「結束導航」那一刻
+-- 才算出來的實際數字。status 標記這趟導航目前處於哪個階段：
+-- planned（已規劃還沒出發）／active（正在走）／completed（正常抵達結束）／
+-- cancelled（中途取消或被新導航蓋掉），家屬模式靠這個欄位判斷要不要
+-- 即時把「目前已經走了多久」顯示成還在累加。
+ALTER TABLE navigation_records
+    ADD COLUMN status ENUM('planned', 'active', 'completed', 'cancelled') NOT NULL DEFAULT 'planned' AFTER created_at,
+    ADD COLUMN started_at DATETIME NULL AFTER status,
+    ADD COLUMN ended_at DATETIME NULL AFTER started_at,
+    ADD COLUMN actual_distance_meters INT NOT NULL DEFAULT 0 AFTER ended_at,
+    ADD COLUMN actual_duration_seconds INT NOT NULL DEFAULT 0 AFTER actual_distance_meters;
+
+CREATE INDEX idx_navigation_status ON navigation_records(user_id, status, created_at);
+
+-- =========================================================
+-- App 使用分析與意見回饋模組（新增，增量開發，不影響上方既有資料表）
+-- 對應 backend/server.js 的 App 使用紀錄／使用者意見回饋相關 API
+-- =========================================================
+
+-- 15. app_sessions App 使用期間紀錄表
+-- 使用者每打開一次 App 就會產生一筆，記錄「這一次總共用了多久」，
+-- last_active_at 由前端定期回報更新，用來判斷這個 session 是不是
+-- 已經閒置太久（久到可以視為已經結束、標記成 expired）。
+CREATE TABLE app_sessions (
+    session_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_active_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ended_at DATETIME NULL,
+    duration_seconds INT NOT NULL DEFAULT 0,
+    app_version VARCHAR(30),
+    device_platform VARCHAR(30) DEFAULT 'android',
+    status ENUM('active', 'ended', 'expired') NOT NULL DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_app_sessions_user
+        FOREIGN KEY (user_id) REFERENCES users(user_id)
+        ON DELETE CASCADE
+);
+
+-- 16. feedback 使用者意見回饋表
+-- 給使用者回報問題或建議用（分類、星等評分、文字內容），
+-- status 讓後台可以標記「已讀／已回覆／已解決／不受理」，
+-- admin_reply 存放後台的回覆內容。
+CREATE TABLE feedback (
+    feedback_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    category ENUM('navigation', 'voice', 'camera', 'location', 'suggestion', 'bug', 'other') NOT NULL DEFAULT 'other',
+    rating TINYINT,
+    title VARCHAR(150),
+    message TEXT NOT NULL,
+    status ENUM('pending', 'reviewing', 'resolved', 'rejected') NOT NULL DEFAULT 'pending',
+    admin_reply TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_feedback_user
+        FOREIGN KEY (user_id) REFERENCES users(user_id)
+        ON DELETE CASCADE
+);
+
+-- 17. usage_events App 功能使用事件表
+-- 記錄使用者在 App 裡做了什麼操作（例如切換到哪個畫面、按了哪個功能），
+-- event_type 是事件的種類名稱，event_data 用 JSON 格式存放這個事件
+-- 額外的細節資料，session_id 選填串接回是哪一次 App 使用期間發生的。
+CREATE TABLE usage_events (
+    event_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    session_id BIGINT NULL,
+    event_type VARCHAR(100) NOT NULL,
+    screen_name VARCHAR(100),
+    event_data JSON,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_usage_events_user
+        FOREIGN KEY (user_id) REFERENCES users(user_id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_usage_events_session
+        FOREIGN KEY (session_id) REFERENCES app_sessions(session_id)
+        ON DELETE SET NULL
+);
+
+CREATE INDEX idx_app_sessions_user_time ON app_sessions(user_id, started_at);
+CREATE INDEX idx_feedback_status ON feedback(status, created_at);
+CREATE INDEX idx_feedback_user_time ON feedback(user_id, created_at);
+CREATE INDEX idx_usage_events_type ON usage_events(event_type, created_at);
+CREATE INDEX idx_usage_events_user_time ON usage_events(user_id, created_at);

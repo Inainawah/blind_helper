@@ -10,6 +10,8 @@ import android.hardware.camera2.CaptureRequest
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.content.Intent
 import android.annotation.SuppressLint
 import android.os.Bundle
@@ -247,6 +249,74 @@ fun CameraDetectionLayout(
     val utteranceCompletionSignals =
         remember { java.util.concurrent.ConcurrentHashMap<String, CompletableDeferred<Unit>>() }
 
+    // ===== 聊天語音優先權層（給未來「問 Gemini」語音助理功能用）=====
+    // 三層優先權：導航語音 > 相機警報 > 聊天語音。聊天語音是新增的最低優先層，
+    // 故意不像 isNavigationSpeaking／isVoiceStatusSpeaking 那樣被加進任何
+    // 「別打斷我」的保護名單——上面兩層原本的 QUEUE_FLUSH 邏輯完全不用改，
+    // 自然就能蓋過正在播放或排隊中的聊天語音，不需要額外寫保護或互斥邏輯。
+    // isChatSpeaking 單純用來讓畫面知道「助理正在講答案」（例如暫時停用問答
+    // 按鈕），不是用來擋警報的旗標。用 AtomicBoolean 是因為 TTS 引擎的
+    // onStart/onDone/onError/onStop 回呼不保證在主執行緒上觸發。
+    val isChatSpeaking = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+
+    // 跟 isChatSpeaking 同步更新的 Compose 狀態版本，單純給按鈕畫面用——
+    // 直接在畫面程式碼裡讀 AtomicBoolean.get() 不會讓 Compose 知道要重新
+    // 繪製，按鈕會停留在舊的樣子，所以额外存一份給 UI 讀取、觸發重繪。
+    var isChatSpeakingUi by remember { mutableStateOf(false) }
+
+    // chat_ 開頭的 utteranceId -> 這句話有沒有被中途打斷（true）或正常講完
+    // （false）。onStop(interrupted) 只會告訴 TTS 引擎自己「這句話被打斷了」，
+    // 不會把這個資訊帶回正在等待的協程，所以額外用這個小 map 把結果帶出去，
+    // 給 speakChatResponse 在等待完成之後查詢——之後「問 Gemini」按鈕可以
+    // 依這個結果判斷要不要告訴使用者「剛剛的回答被中斷了」。
+    val chatUtteranceInterrupted =
+        remember { java.util.concurrent.ConcurrentHashMap<String, Boolean>() }
+
+    // 播放聊天語音回答，給未來「問 Gemini」按鈕呼叫（目前還沒有串接任何語音
+    // 助理 API，純粹先把優先權機制搭好）。一律用 QUEUE_ADD、絕不用
+    // QUEUE_FLUSH，所以聊天語音永遠不會搶在導航或警報前面播出；但導航或警報
+    // 本身要插播時，仍然會正常蓋過正在播放或排隊中的聊天語音。
+    // 回傳 true 代表這句話完整講完；false 代表被打斷、合成失敗，或是等了
+    // 15 秒都沒收到任何回呼（TTS 引擎可能卡住），呼叫端可依此決定要不要提示
+    // 使用者「請重新提問」。
+    val speakChatResponse: suspend (String) -> Boolean = speak@{ text ->
+        val utteranceId = "chat_${System.currentTimeMillis()}"
+        isChatSpeaking.set(true)
+        isChatSpeakingUi = true
+
+        // 跟系統要求音訊焦點，讓 TalkBack（如果使用者有開）知道「現在有別的
+        // 聲音要講話」，系統通常會因此自動把 TalkBack 的音量降低或暫停，
+        // 避免兩邊的語音疊在一起、聽不清楚。只在聊天語音要講話的這幾秒內
+        // 跟系統借用焦點，講完立刻還回去——導航、警報的語音完全沒有經過
+        // 這一段，不受影響。
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            .build()
+        val focusResult = audioManager?.requestAudioFocus(focusRequest)
+        android.util.Log.d("ChatAssistant", "要求音訊焦點結果=$focusResult（1=成功取得）")
+
+        try {
+            val signal = CompletableDeferred<Unit>()
+            utteranceCompletionSignals[utteranceId] = signal
+            val speakResult = tts?.speak(text, TextToSpeech.QUEUE_ADD, null, utteranceId)
+            android.util.Log.d("ChatAssistant", "tts?.speak 回傳值=$speakResult（null 代表 tts 本身是 null），utteranceId=$utteranceId")
+            val gotCallback = withTimeoutOrNull(15000L) { signal.await() } != null
+            utteranceCompletionSignals.remove(utteranceId)
+            val wasInterrupted = chatUtteranceInterrupted.remove(utteranceId) ?: true
+            return@speak gotCallback && !wasInterrupted
+        } finally {
+            audioManager?.abandonAudioFocusRequest(focusRequest)
+            isChatSpeaking.set(false)
+            isChatSpeakingUi = false
+        }
+    }
+
     LaunchedEffect(ttsInitialized) {
         if (ttsInitialized) {
             isIntroSpeaking.set(true)
@@ -313,6 +383,7 @@ fun CameraDetectionLayout(
                 } else if (utteranceId != null) {
                     navigationUtteranceRegistry.remove(utteranceId)
                     if (utteranceId.startsWith("turn_guide_")) isNavigationSpeaking.set(false)
+                    if (utteranceId.startsWith("chat_")) chatUtteranceInterrupted[utteranceId] = false
                 }
             }
 
@@ -324,6 +395,8 @@ fun CameraDetectionLayout(
                 } else if (utteranceId != null) {
                     navigationUtteranceRegistry.remove(utteranceId)
                     if (utteranceId.startsWith("turn_guide_")) isNavigationSpeaking.set(false)
+                    // 合成失敗也算沒有正常講完，跟被打斷一樣處理。
+                    if (utteranceId.startsWith("chat_")) chatUtteranceInterrupted[utteranceId] = true
                 }
             }
 
@@ -331,6 +404,8 @@ fun CameraDetectionLayout(
                 completeUtteranceSignal(utteranceId)
                 if (utteranceId == "welcome_intro") {
                     isIntroSpeaking.set(false)
+                } else if (utteranceId != null && utteranceId.startsWith("chat_")) {
+                    chatUtteranceInterrupted[utteranceId] = interrupted
                 }
                 // 導航語音被警報插播打斷（interrupted = true）：把同一句話重新排回去播放，
                 // 不會就這樣消失不見。如果連續被打斷好幾次（路口警報密集的情況），
@@ -508,6 +583,154 @@ DisposableEffect(Unit) {
     }
 }
 
+    // ===== 問問題語音助理（語音輸入部分，給未來接 Gemini API 用）=====
+    // 跟上面「說出目的地」那套語音辨識完全分開、各自獨立的一組
+    // SpeechRecognizer／RecognitionListener，不共用同一個辨識器——避免把
+    // 「設定目的地」跟「問問題聊天」這兩個不相關的流程混在同一組回呼裡判斷，
+    // 不小心影響到既有、已經很穩定的導航語音指令功能。
+    var isChatListening by remember { mutableStateOf(false) }
+    var chatRecognizedText by remember { mutableStateOf("") }
+
+    // 這次 App 使用期間累積的對話紀錄，讓使用者可以自然地延續上一句問題
+    // （例如先問「附近有超商嗎」，接著說「那幫我導航過去」）。單純存在
+    // 記憶體裡，不寫資料庫，離開 App 重開就會重新開始，不用額外清除的
+    // 操作。只保留最近 10 輪（5 次問答），避免越問越多、每次都要送一大串
+    // 歷史紀錄給後端。
+    var chatHistory by remember { mutableStateOf<List<AssistantHistoryTurn>>(emptyList()) }
+
+    val chatSpeechRecognizer = remember {
+        SpeechRecognizer.createSpeechRecognizer(context)
+    }
+    val chatSpeechIntent = remember {
+        Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-TW")
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        }
+    }
+
+    DisposableEffect(Unit) {
+        chatSpeechRecognizer.setRecognitionListener(
+            object : RecognitionListener {
+
+                override fun onReadyForSpeech(params: Bundle?) {}
+                override fun onBeginningOfSpeech() {}
+                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onBufferReceived(buffer: ByteArray?) {}
+
+                override fun onEndOfSpeech() {
+                    isChatListening = false
+                }
+
+                override fun onError(error: Int) {
+                    isChatListening = false
+                    android.util.Log.d("ChatAssistant", "語音辨識失敗，錯誤碼=$error")
+                }
+
+                override fun onResults(results: Bundle?) {
+                    isChatListening = false
+                    val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                    android.util.Log.d("ChatAssistant", "onResults 辨識結果：${text ?: "(空)"}")
+                    if (!text.isNullOrBlank()) {
+                        chatRecognizedText = text
+                        coroutineScope.launch {
+                            val userId = deviceProfile?.userId
+                            val result = if (userId != null) {
+                                // 跟目的地語音指令一樣的做法：先取得目前真實座標，
+                                // 讓後端能查真實地址／附近真實地點給 Gemini 當依據，
+                                // 不是只把文字問題送出去而已。拿不到定位（例如室內
+                                // 訊號不好）就傳 null，後端一樣能回答，只是沒有位置
+                                // 依據，不會因為定位失敗就整個問不了。
+                                val (lat, lng) = getCurrentLocation(context)
+                                requestAssistantAnswer(serverUrl, userId, text, lat, lng, chatHistory)
+                            } else {
+                                AssistantResult.Failed
+                            }
+                            android.util.Log.d("ChatAssistant", "助理結果：$result")
+
+                            // 把這一輪存進對話紀錄，讓下一次問問題可以自然地延續
+                            // 這一句（例如接著說「那幫我導航過去」）。問答失敗的
+                            // 這輪不存，避免錯誤訊息污染之後的對話上下文。
+                            fun rememberTurn(modelReplyText: String) {
+                                chatHistory = (
+                                    chatHistory +
+                                        AssistantHistoryTurn("user", text) +
+                                        AssistantHistoryTurn("model", modelReplyText)
+                                    ).takeLast(10)
+                            }
+
+                            when (result) {
+                                is AssistantResult.Navigate -> {
+                                    // 使用者想去的地方——直接接去既有、已經驗證過的
+                                    // 導航流程，跟手動說出目的地走的是同一條路，不是
+                                    // 另外做一套。這段確認話跟目的地語音指令的「規劃
+                                    // 成功」訊息一樣重要（使用者需要聽到到底規劃去
+                                    // 哪裡），所以用跟它一樣的保護機制（isVoiceStatus
+                                    // Speaking），不用聊天語音那套「可以被警報打斷」
+                                    // 的優先權，避免使用者漏聽規劃結果。
+                                    isVoiceStatusSpeaking.set(true)
+                                    try {
+                                        val (lat, lng) = getCurrentLocation(context)
+                                        val response = requestDirections(
+                                            serverUrl, lat, lng, result.destinationAddress, userId
+                                        )
+                                        val utteranceId = "voice_status_assistant_navigate_${System.currentTimeMillis()}"
+                                        val summary = if (response.success) {
+                                            navigationResult = response
+                                            showNavigationTab = true
+                                            "好的，為您規劃前往${result.destinationName}的路線。" +
+                                                "全程約 ${response.distance ?: ""}，需要 ${response.duration ?: ""}，" +
+                                                "開始導航後會依照您的位置提醒轉彎。"
+                                        } else {
+                                            navigationResult = response
+                                            "導航規劃失敗，原因為 ${response.message ?: "未知錯誤"}"
+                                        }
+                                        val signal = CompletableDeferred<Unit>()
+                                        utteranceCompletionSignals[utteranceId] = signal
+                                        tts?.speak(summary, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+                                        withTimeoutOrNull(15000L) { signal.await() }
+                                        utteranceCompletionSignals.remove(utteranceId)
+                                        rememberTurn(summary)
+                                    } finally {
+                                        isVoiceStatusSpeaking.set(false)
+                                    }
+                                }
+                                is AssistantResult.Speak -> {
+                                    speakChatResponse(result.text)
+                                    rememberTurn(result.text)
+                                }
+                                AssistantResult.Failed -> {
+                                    // 不管是沒有 userId、網路失敗、後端出錯，還是 Gemini
+                                    // 本身回應失敗（例如額度用完），都統一講這句話，不把
+                                    // 技術性錯誤內容唸給使用者聽。
+                                    speakChatResponse("助理暫時無法回答，請稍後再試")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                override fun onPartialResults(partialResults: Bundle?) {
+                    val text = partialResults
+                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        ?.firstOrNull()
+                    if (!text.isNullOrBlank()) {
+                        chatRecognizedText = text
+                    }
+                }
+
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            }
+        )
+
+        onDispose {
+            chatSpeechRecognizer.destroy()
+        }
+    }
+
     // 導航結果一旦更新（使用者說出目的地並取得路線，或結束導航），
     // 就啟動/停止三階段轉彎提示。既有的 navigationResult 狀態與 UI 完全不受影響。
     LaunchedEffect(navigationResult) {
@@ -634,17 +857,6 @@ DisposableEffect(Unit) {
         activeGuide?.onAzimuth(compassAzimuth)
     }
 
-    // 狀態指示燈的呼吸燈動畫
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    val alphaAnim by infiniteTransition.animateFloat(
-        initialValue = 0.3f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1000, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "alpha"
-    )
 
     // 偵測到危險時觸發語音與紀錄（優先級與搶佔邏輯）
     LaunchedEffect(detections) {
@@ -693,6 +905,16 @@ DisposableEffect(Unit) {
             lastSpokenClassId = det.classId
             lastSpokenPriority = priority
 
+            // 聊天語音優先權最低：如果使用者這時候正在用「問問題」功能錄音，
+            // 警報不能等使用者講完才插播，所以直接打斷錄音。cancel() 不會觸發
+            // RecognitionListener 的任何回呼，所以要自己把 isChatListening 設回
+            // false，不能依賴 onError/onEndOfSpeech 幫忙重置。
+            val wasChatInterrupted = isChatListening
+            if (wasChatInterrupted) {
+                chatSpeechRecognizer.cancel()
+                isChatListening = false
+            }
+
             // 導航路徑語音正在講的時候，不管警報是不是緊急等級，一律不打斷它，
             // 排隊等它講完再放。其餘（緊急與否、冷卻時間、一般警報要不要排隊）
             // 維持原本邏輯不變。
@@ -719,6 +941,18 @@ DisposableEffect(Unit) {
         "normal_alert_$currentTime"
     )
 }
+
+            // 剛剛打斷了使用者正在問的問題，警報播放完後（用 QUEUE_ADD 排在
+            // 後面）補一句提示，讓使用者知道問題沒有送出去，需要重新按一次
+            // 問題按鈕才能再問一次。
+            if (wasChatInterrupted) {
+                tts?.speak(
+                    "請重新提問",
+                    TextToSpeech.QUEUE_ADD,
+                    null,
+                    "ask_again_prompt_$currentTime"
+                )
+            }
 
             // 新增日誌條目
             val timeStamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
@@ -1144,71 +1378,9 @@ DisposableEffect(Unit) {
                             )
                         }
                     }
-                }
 
-                // 右側面板：控制項與危險警報
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .background(Color(0xFF121212))
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    HoldToTalkButton(
-    isListening = isListening,
-    onToggle = {
-        if (isListening) {
-            speechRecognizer.stopListening()
-            isListening = false
-        } else {
-            recognizedText = "正在聆聽..."
-            try {
-                speechRecognizer.startListening(speechIntent)
-                isListening = true
-            } catch (e: SecurityException) {
-                recognizedText = "缺乏錄音權限，請開啟設定"
-                isListening = false
-            } catch (e: Exception) {
-                recognizedText = "語音辨識啟動失敗"
-                isListening = false
-            }
-        }
-    }
-)
-Text(
-    text = "語音內容：$recognizedText",
-    color = Color(0xFFFFD54F),
-    fontSize = 18.sp,
-    fontWeight = FontWeight.Bold
-)
-Spacer(modifier = Modifier.height(16.dp))
-                    // 狀態膠囊指示標籤
-                    Row(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(Color(0xAA1E1E1E))
-                            .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(20.dp))
-                            .padding(horizontal = 12.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(10.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFF81C784).copy(alpha = alphaAnim))
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "相機掃描中",
-                            color = Color.White,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    // 手電筒開關
+                    // 手電筒開關——疊在相機畫面右上角，不佔用右側控制面板的
+                    // 空間，不管右側面板放多少東西都一定看得到、按得到。
                     IconButton(
                         onClick = {
                             val currentCamera = camera
@@ -1224,6 +1396,8 @@ Spacer(modifier = Modifier.height(16.dp))
                             }
                         },
                         modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(12.dp)
                             .semantics {
                                 contentDescription =
                                     if (isFlashlightOn)
@@ -1232,19 +1406,76 @@ Spacer(modifier = Modifier.height(16.dp))
                                         "手電筒已關閉，點兩下開啟"
                                 role = Role.Button
                             }
-                            .size(50.dp)
+                            .size(45.dp)
                             .clip(CircleShape)
                             .background(Color(0xAA1E1E1E))
                             .border(1.dp, Color(0x33FFFFFF), CircleShape)
                     ) {
                         Text(
                             text = if (isFlashlightOn) "🔦" else "💡",
-                            fontSize = 24.sp
+                            fontSize = 20.sp
                         )
                     }
+                }
 
-                    Spacer(modifier = Modifier.weight(1f))
-
+                // 右側面板：控制項與危險警報
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .background(Color(0xFF121212))
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    HoldToTalkButton(
+                        isListening = isListening,
+                        onToggle = {
+                            if (isListening) {
+                                speechRecognizer.stopListening()
+                                isListening = false
+                            } else {
+                                recognizedText = "正在聆聽..."
+                                try {
+                                    speechRecognizer.startListening(speechIntent)
+                                    isListening = true
+                                } catch (e: SecurityException) {
+                                    recognizedText = "缺乏錄音權限，請開啟設定"
+                                    isListening = false
+                                } catch (e: Exception) {
+                                    recognizedText = "語音辨識啟動失敗"
+                                    isListening = false
+                                }
+                            }
+                        }
+                    )
+Text(
+    text = "語音內容：$recognizedText",
+    color = Color(0xFFFFD54F),
+    fontSize = 18.sp,
+    fontWeight = FontWeight.Bold
+)
+Spacer(modifier = Modifier.height(16.dp))
+                    AskAssistantButton(
+                        isListening = isChatListening,
+                        isSpeaking = isChatSpeakingUi,
+                        onToggle = {
+                            if (isChatListening) {
+                                chatSpeechRecognizer.stopListening()
+                                isChatListening = false
+                            } else {
+                                chatRecognizedText = ""
+                                try {
+                                    chatSpeechRecognizer.startListening(chatSpeechIntent)
+                                    isChatListening = true
+                                } catch (e: SecurityException) {
+                                    chatRecognizedText = "缺乏錄音權限，請開啟設定"
+                                } catch (e: Exception) {
+                                    chatRecognizedText = "語音辨識啟動失敗"
+                                }
+                            }
+                        }
+                    )
                     // 若偵測到危險物件則顯示危險指示器
                     val dangerousItems = detections.filter { it.isDanger }
                     val closestDangerItem = dangerousItems.maxByOrNull { it.proximity }
@@ -1448,39 +1679,16 @@ Spacer(modifier = Modifier.height(16.dp))
                         }
                     }
 
-                    // 覆蓋於相機預覽上方的頂部列
+                    // 覆蓋於相機預覽上方的頂部列——只放手電筒，不佔用下面
+                    // 控制區的空間，不管畫面內容再多也一定看得到、按得到，
+                    // 不需要靠捲動才能找到。
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.End,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // 狀態膠囊指示標籤
-                        Row(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(20.dp))
-                                .background(Color(0xAA1E1E1E))
-                                .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(20.dp))
-                                .padding(horizontal = 12.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                .size(10.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFF81C784).copy(alpha = alphaAnim))
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "相機掃描中",
-                                color = Color.White,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        // 手電筒開關
                         IconButton(
                             onClick = {
                                 val currentCamera = camera
@@ -1526,32 +1734,52 @@ Spacer(modifier = Modifier.height(16.dp))
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     HoldToTalkButton(
-    isListening = isListening,
-    onToggle = {
-        if (isListening) {
-            speechRecognizer.stopListening()
-            isListening = false
-        } else {
-            recognizedText = "正在聆聽..."
-            try {
-                speechRecognizer.startListening(speechIntent)
-                isListening = true
-            } catch (e: SecurityException) {
-                recognizedText = "缺乏錄音權限，請開啟設定"
-                isListening = false
-            } catch (e: Exception) {
-                recognizedText = "語音辨識啟動失敗"
-                isListening = false
-            }
-        }
-    }
-)
+                        isListening = isListening,
+                        onToggle = {
+                            if (isListening) {
+                                speechRecognizer.stopListening()
+                                isListening = false
+                            } else {
+                                recognizedText = "正在聆聽..."
+                                try {
+                                    speechRecognizer.startListening(speechIntent)
+                                    isListening = true
+                                } catch (e: SecurityException) {
+                                    recognizedText = "缺乏錄音權限，請開啟設定"
+                                    isListening = false
+                                } catch (e: Exception) {
+                                    recognizedText = "語音辨識啟動失敗"
+                                    isListening = false
+                                }
+                            }
+                        }
+                    )
     Text(
     text = "語音內容：$recognizedText",
     color = Color(0xFFFFD54F),
     fontSize = 18.sp,
     fontWeight = FontWeight.Bold
 )
+                    AskAssistantButton(
+                        isListening = isChatListening,
+                        isSpeaking = isChatSpeakingUi,
+                        onToggle = {
+                            if (isChatListening) {
+                                chatSpeechRecognizer.stopListening()
+                                isChatListening = false
+                            } else {
+                                chatRecognizedText = ""
+                                try {
+                                    chatSpeechRecognizer.startListening(chatSpeechIntent)
+                                    isChatListening = true
+                                } catch (e: SecurityException) {
+                                    chatRecognizedText = "缺乏錄音權限，請開啟設定"
+                                } catch (e: Exception) {
+                                    chatRecognizedText = "語音辨識啟動失敗"
+                                }
+                            }
+                        }
+                    )
                     // 若偵測到危險物件則顯示危險指示器
                     val dangerousItems = detections.filter { it.isDanger }
                     val closestDangerItem = dangerousItems.maxByOrNull { it.proximity }
@@ -1934,6 +2162,62 @@ fun HoldToTalkButton(
         )
     }
 }
+
+// 「問問題」語音助理按鈕，跟上面 HoldToTalkButton（設定目的地用）是同樣的
+// 外觀與無障礙設計規則，獨立成另一個按鈕、各自管理自己的狀態，不共用同一套
+// isListening，避免把兩個不同用途的語音輸入混在一起。
+// 三個狀態都各自給了專屬的 contentDescription，讓開啟 TalkBack 的使用者滑到
+// 這顆按鈕時，可以聽到跟目前畫面顯示一致的說明文字（而不是「問問題按鈕」這種
+// 固定不變、不管目前狀態的說明）。助理正在回答時故意用 enabled = !isSpeaking
+// 停用點擊，避免使用者在還沒聽完回答前又點一次，開啟第二段重疊的錄音。
+@Composable
+fun AskAssistantButton(
+    isListening: Boolean,
+    isSpeaking: Boolean,
+    onToggle: () -> Unit
+) {
+    val label = when {
+        isSpeaking -> "🔊 助理回答中"
+        isListening -> "⏹ 停止聆聽"
+        else -> "💬 問問題"
+    }
+    val description = when {
+        isSpeaking -> "助理正在回答，請稍候"
+        isListening -> "正在聆聽您的問題，點兩下停止"
+        else -> "問問題按鈕，點兩下開始說話"
+    }
+    val accentColor = Color(0xFFB388FF)
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(70.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(
+                if (isListening) accentColor else Color(0xFF1E1E1E)
+            )
+            .border(
+                width = 2.dp,
+                color = accentColor,
+                shape = RoundedCornerShape(18.dp)
+            )
+            .clickable(enabled = !isSpeaking) {
+                onToggle()
+            }
+            .semantics {
+                contentDescription = description
+                role = Role.Button
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            color = if (isListening) Color.Black else Color.White,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
 @Composable
 fun PermissionDeniedScreen(onRequestPermission: () -> Unit) {
     Box(
@@ -2232,6 +2516,87 @@ private data class EnvironmentLogRequest(
 
 @Serializable
 private data class LocationPingRequest(val user_id: Int, val latitude: Double, val longitude: Double)
+
+// 一輪對話紀錄，role 只會是 "user"（使用者問的話）或 "model"（助理答的
+// 話），對應後端 Gemini 的角色命名。
+@Serializable
+data class AssistantHistoryTurn(val role: String, val text: String)
+
+@Serializable
+private data class AssistantAskRequest(
+    val user_id: Int,
+    val question: String,
+    // 選填：使用者目前真實座標。後端會拿這個去查真實地址跟附近真實地點，
+    // 讓 Gemini 根據真資料回答，不是自己憑空亂猜——沒有座標（例如定位還
+    // 沒取得）也能問，後端會明確告知 Gemini 沒有位置資料。
+    val latitude: Double? = null,
+    val longitude: Double? = null,
+    // 選填：這次 App 使用期間之前問過的幾輪對話，讓使用者可以自然地
+    // 延續上一句問題（例如先問「附近有超商嗎」，接著說「那幫我導航過去」）。
+    val history: List<AssistantHistoryTurn> = emptyList()
+)
+
+@Serializable
+private data class AssistantAskResponse(
+    val success: Boolean,
+    // "speak"：answer 是要念出來的一段話；"navigate"：使用者想去某個地方，
+    // destination_name／destination_address 是後端從真實地點清單裡選出來的
+    // 目的地，呼叫端要接去既有的導航流程，不是念出來。
+    val action: String? = null,
+    val answer: String? = null,
+    val destination_name: String? = null,
+    val destination_address: String? = null
+)
+
+// 問問題語音助理的結果：要嘛是一段要念出來的話，要嘛是使用者想去的目的地
+// （交給呼叫端接去既有的導航流程），要嘛整個問答失敗。
+sealed class AssistantResult {
+    data class Speak(val text: String) : AssistantResult()
+    data class Navigate(val destinationName: String, val destinationAddress: String) : AssistantResult()
+    object Failed : AssistantResult()
+}
+
+// 問問題語音助理：把辨識到的文字、以及使用者目前的真實座標送給後端的
+// /api/assistant/ask（後端再查真實地址/地點、轉呼叫 Gemini，並判斷使用者
+// 是想問資訊還是想去某個地方）。任何失敗狀況（網路、後端、Gemini 本身）
+// 都統一回傳 Failed，交給呼叫端決定要講哪一句提示，不在這裡夾帶技術性
+// 錯誤訊息，避免講給使用者聽的句子太長、太難懂。
+suspend fun requestAssistantAnswer(
+    serverUrl: String,
+    userId: Int,
+    question: String,
+    latitude: Double? = null,
+    longitude: Double? = null,
+    history: List<AssistantHistoryTurn> = emptyList()
+): AssistantResult =
+    withContext(Dispatchers.IO) {
+        val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+        val reqData = AssistantAskRequest(userId, question, latitude, longitude, history)
+        val requestBody = json.encodeToString(AssistantAskRequest.serializer(), reqData).toRequestBody(jsonMediaType)
+        val request = Request.Builder()
+            .url("$serverUrl/api/assistant/ask")
+            .post(requestBody)
+            .build()
+        try {
+            client.newCall(request).execute().use { response ->
+                val bodyString = response.body?.string() ?: return@withContext AssistantResult.Failed
+                val res = json.decodeFromString(AssistantAskResponse.serializer(), bodyString)
+                if (!res.success) return@withContext AssistantResult.Failed
+
+                val destinationName = res.destination_name
+                val destinationAddress = res.destination_address
+                when {
+                    res.action == "navigate" && destinationName != null && destinationAddress != null ->
+                        AssistantResult.Navigate(destinationName, destinationAddress)
+                    res.answer != null -> AssistantResult.Speak(res.answer)
+                    else -> AssistantResult.Failed
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            AssistantResult.Failed
+        }
+    }
 
 // 導航進行中回報座標的間隔。設太短會一直打後端，設太長會讓停留點判斷不準；
 // 20 秒可以在 5 分鐘的停留門檻內取得約 15 個樣本，足夠判斷。

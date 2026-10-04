@@ -6,6 +6,7 @@ require("dotenv").config();
 const db = require("./db");
 const familyRouter = require("./family");
 const familyPairingRouter = require("./family_pairing");
+const { distanceMeters } = require("./geo");
 
 const app = express();
 
@@ -42,6 +43,38 @@ const GOOGLE_DIRECTIONS_URL =
 
 const GOOGLE_API_TIMEOUT_MS = 5000;
 const GOOGLE_API_MAX_ATTEMPTS = 3;
+
+/*
+ * Gemini 語音助理用的模型，寫成環境變數可調整——避免 Google 之後下架或
+ * 更換模型版本時，要改程式碼才能換，直接改 .env 的 GEMINI_MODEL 即可。
+ * gemini-flash-latest 是 Google 官方提供的別名，會自動對應到目前最新的
+ * 穩定版 Flash 模型。
+ */
+const GEMINI_API_BASE_URL =
+    "https://generativelanguage.googleapis.com/v1beta/models";
+const GEMINI_MODEL =
+    process.env.GEMINI_MODEL || "gemini-flash-latest";
+const GEMINI_API_TIMEOUT_MS = 8000;
+
+/*
+ * Places API（新版，POST + JSON，跟 Geocoding/Directions 那套舊版
+ * GET 查詢參數的 API 不是同一代，所以沒有共用 requestGoogleApi()）。
+ * 用來查「使用者問題關鍵字」附近真實存在的地點，餵給 Gemini 當作
+ * 真實資料，避免它自己憑空編造店家。跟 Geocoding/Directions 共用
+ * 同一個 GOOGLE_MAPS_API_KEY，只是 Places 這個 API 要另外在
+ * Google Cloud 主控台確認有啟用。
+ */
+const PLACES_SEARCH_TEXT_URL =
+    "https://places.googleapis.com/v1/places:searchText";
+// 這個半徑只是「優先偏向」這個範圍（locationBias），Google 官方文件明講
+// 「結果可能超出這個範圍」，不是硬性範圍——實測發現使用者問一些查詢字串
+// 剛好跟很遠地方的店家名稱很像時，真的會查到幾十、幾百公里外的真實地點。
+// 所以另外用 PLACES_MAX_DISTANCE_M 當「硬性」門檻，查到的結果如果真實
+// 距離超過這個數字就直接丟棄，不會進到餵給 Gemini 的清單裡——對走路的
+// 視障使用者來說，幾公里外的地點本來就不會是「附近」。
+const PLACES_SEARCH_RADIUS_M = 1000;
+const PLACES_MAX_DISTANCE_M = 2000;
+const PLACES_MAX_RESULTS = 5;
 
 /* =========================================================
    共用函式
@@ -181,6 +214,234 @@ async function requestGoogleApi(url, params) {
     throw new Error(
         "Google API retry loop ended unexpectedly"
     );
+}
+
+/**
+ * 用使用者的問題文字當查詢關鍵字，查詢使用者目前座標附近真實存在的地點
+ * （Places API 文字搜尋），並換算成以使用者座標為準的真實距離（公尺）。
+ *
+ * 查不到、或 API 本身出錯都回傳空陣列，不拋出例外——這個資料只是
+ * 「有的話可以讓 Gemini 回答更準」，不應該讓使用者整個問不到答案。
+ *
+ * @param {number} latitude
+ * @param {number} longitude
+ * @param {string} query
+ * @returns {Promise<Array<{name: string, address: string, distanceMeters: number}>>}
+ */
+async function searchNearbyPlaces(latitude, longitude, query) {
+    try {
+        const response = await axios.post(
+            PLACES_SEARCH_TEXT_URL,
+            {
+                textQuery: query,
+                languageCode: "zh-TW",
+                locationBias: {
+                    circle: {
+                        center: { latitude, longitude },
+                        radius: PLACES_SEARCH_RADIUS_M
+                    }
+                }
+            },
+            {
+                headers: {
+                    "X-Goog-Api-Key": process.env.GOOGLE_MAPS_API_KEY,
+                    "X-Goog-FieldMask":
+                        "places.displayName,places.formattedAddress,places.location"
+                },
+                timeout: GEMINI_API_TIMEOUT_MS
+            }
+        );
+
+        const places = response.data?.places || [];
+
+        return places
+            .filter((place) => place.location)
+            .map((place) => ({
+                name: place.displayName?.text || "未命名地點",
+                address: place.formattedAddress || "",
+                distanceMeters: Math.round(
+                    distanceMeters(
+                        { latitude, longitude },
+                        place.location
+                    )
+                )
+            }))
+            .filter((place) => place.distanceMeters <= PLACES_MAX_DISTANCE_M)
+            .sort((a, b) => a.distanceMeters - b.distanceMeters)
+            .slice(0, PLACES_MAX_RESULTS);
+
+    } catch (error) {
+        console.error(
+            "Places API 查詢失敗，將以沒有地點資料的方式繼續:",
+            error?.response?.data || error.message
+        );
+        return [];
+    }
+}
+
+/*
+ * 讓 Gemini 可以「呼叫」的工具：使用者想去某個地方時，不是只用文字講，
+ * 而是明確回傳一個「請開始導航」的結構化指令（Function Calling），
+ * App 端收到後會直接接去既有、已經驗證過的導航功能（見 /api/navigation/
+ * directions 跟 Android 端的 TurnByTurnGuide），不是另外做一套導航邏輯。
+ */
+const ASSISTANT_TOOLS = [
+    {
+        functionDeclarations: [
+            {
+                name: "start_navigation",
+                description:
+                    "當使用者的意圖是想要「前往」某個地點（不只是單純查詢資訊）" +
+                    "時呼叫這個工具，開始導航到該地點。目的地必須是下面提供的" +
+                    "真實地點清單裡的其中一個，不可以自己編造。",
+                parameters: {
+                    type: "OBJECT",
+                    properties: {
+                        destination_name: {
+                            type: "STRING",
+                            description: "目的地名稱，必須完全照抄清單裡的名稱"
+                        },
+                        destination_address: {
+                            type: "STRING",
+                            description: "目的地地址，必須完全照抄清單裡的地址"
+                        }
+                    },
+                    required: ["destination_name", "destination_address"]
+                }
+            }
+        ]
+    }
+];
+
+/*
+ * 適用整段對話、不會每一輪都重複的系統規則。原本這些規則跟每一輪的
+ * 真實資料混在同一段文字裡，現在既然支援多輪對話（見 history 參數），
+ * 規則只需要講一次，放進 systemInstruction，contents 裡每一輪才單純是
+ * 對話內容本身，比較不會讓模型搞混「這是規則」還是「這是對話歷史」。
+ */
+const ASSISTANT_SYSTEM_INSTRUCTION =
+    "你是視障導航 App 裡的語音助理。使用者正在走路、無法看螢幕，只能用" +
+    "耳朵聽你的回答，請用繁體中文、口語、簡短（最多兩到三句話）回答，" +
+    "不要使用條列、標題或任何螢幕排版符號。\n\n" +
+    "最重要的規則：每一輪對話裡提供的地址跟地點清單，是系統先查證過的" +
+    "真實資料，你只能根據這份真實資料回答或決定導航目的地，絕對不能自己" +
+    "憑空想像或編造清單以外的店家名稱、地址或距離。如果清單裡沒有能回答" +
+    "這個問題的地點，就老實告訴使用者「附近沒有查到相關地點」，不要為了" +
+    "聽起來有幫助而亂猜。\n\n" +
+    "另一個重要規則：如果使用者的意圖是「想要去」某個地方（不是單純" +
+    "查詢資訊），請呼叫 start_navigation 這個工具，從清單裡選一個最" +
+    "符合的地點（例如使用者說「最近的」就選距離最短的那個），不要只是" +
+    "用文字回答、也不要為了確認而反問使用者要選哪一個。除此之外的情況" +
+    "（單純問資訊、問距離、問有沒有、延續前面話題的追問等）才用文字" +
+    "回答。這個 App 支援連續對話，你可以利用之前的對話內容理解使用者" +
+    "這次問題裡「那個」「那家店」之類指代的是什麼；但你仍然沒有辦法" +
+    "執行文字以外、工具以外的任何操作（例如撥打電話、設定提醒），遇到" +
+    "這類需求就老實說做不到即可。";
+
+/**
+ * 呼叫 Gemini API，把使用者的語音問題、先查好的真實位置資料、以及這次
+ * App 使用期間累積的對話歷史送出去。
+ *
+ * 回傳值有兩種：
+ * - { type: "speak", text } ——純粹口頭回答一段資訊
+ * - { type: "navigate", destinationName, destinationAddress } ——使用者
+ *   想去某個地方，呼叫端要接去既有的導航流程，不是播放語音
+ *
+ * 更重要的是：提示詞明確要求 Gemini「只能根據提供的真實資料回答」、
+ * 查不到就老實說查不到——否則 Gemini 會依據自己的一般知識瞎猜一個聽起來
+ * 合理但實際上不存在的店家或距離，對看不到螢幕、只能照著語音指示行動的
+ * 視障使用者來說是真的會被誤導去錯的地方，不是單純答錯而已。
+ *
+ * @param {string} question
+ * @param {string|null} currentAddress 使用者目前座標反查到的真實地址，查不到則為 null
+ * @param {Array<{name: string, address: string, distanceMeters: number}>} nearbyPlaces
+ * @param {Array<{role: string, text: string}>} history 這次 App 使用期間之前問過的幾輪對話，最舊到最新排序
+ * @returns {Promise<{type: "speak", text: string} | {type: "navigate", destinationName: string, destinationAddress: string}>}
+ */
+async function askGemini(question, currentAddress, nearbyPlaces, history) {
+    const url =
+        `${GEMINI_API_BASE_URL}/${GEMINI_MODEL}:generateContent`;
+
+    const placesText =
+        nearbyPlaces.length > 0
+            ? nearbyPlaces
+                .map(
+                    (place) =>
+                        `- ${place.name}（${place.address}，距離使用者約 ${place.distanceMeters} 公尺）`
+                )
+                .join("\n")
+            : "（這次查詢沒有找到相關的真實地點資料）";
+
+    const locationContext = currentAddress
+        ? `使用者目前所在的真實地址：${currentAddress}`
+        : "（目前沒有取得使用者座標或地址資料）";
+
+    const currentTurnText =
+        `${locationContext}\n\n` +
+        `附近真實查到的地點（依距離排序）：\n${placesText}\n\n` +
+        `使用者的問題：${question}`;
+
+    const historyContents = (history || []).map((turn) => ({
+        role: turn.role === "model" ? "model" : "user",
+        parts: [{ text: turn.text }]
+    }));
+
+    const response = await axios.post(
+        url,
+        {
+            systemInstruction: {
+                parts: [{ text: ASSISTANT_SYSTEM_INSTRUCTION }]
+            },
+            contents: [
+                ...historyContents,
+                {
+                    role: "user",
+                    parts: [{ text: currentTurnText }]
+                }
+            ],
+            tools: ASSISTANT_TOOLS
+        },
+        {
+            params: {
+                key: process.env.GEMINI_API_KEY
+            },
+            timeout: GEMINI_API_TIMEOUT_MS
+        }
+    );
+
+    const parts =
+        response.data?.candidates?.[0]?.content?.parts || [];
+
+    const functionCallPart = parts.find((part) => part.functionCall);
+
+    if (
+        functionCallPart &&
+        functionCallPart.functionCall.name === "start_navigation"
+    ) {
+        const args = functionCallPart.functionCall.args || {};
+
+        if (!args.destination_name || !args.destination_address) {
+            throw new Error(
+                "Gemini 呼叫 start_navigation 但缺少目的地參數"
+            );
+        }
+
+        return {
+            type: "navigate",
+            destinationName: args.destination_name,
+            destinationAddress: args.destination_address
+        };
+    }
+
+    const answer = parts.find((part) => part.text)?.text;
+
+    if (!answer) {
+        throw new Error(
+            "Gemini API 回傳格式異常，找不到回答文字"
+        );
+    }
+
+    return { type: "speak", text: answer.trim() };
 }
 
 /**
@@ -3528,6 +3789,158 @@ app.use("/api", familyRouter);
 ========================================================= */
 
 app.use("/api", familyPairingRouter);
+
+/* =========================================================
+   13. 語音助理問答（Gemini）
+========================================================= */
+
+app.post("/api/assistant/ask", async (req, res) => {
+    try {
+        const { user_id, question, latitude, longitude, history } = req.body;
+
+        const userId = parsePositiveInteger(user_id);
+
+        if (userId == null) {
+            return res.status(400).json({
+                success: false,
+                error: {
+                    code: "INVALID_USER_ID",
+                    message: "user_id 必須是大於 0 的整數",
+                    retryable: false
+                }
+            });
+        }
+
+        if (typeof question !== "string" || !question.trim()) {
+            return res.status(400).json({
+                success: false,
+                error: {
+                    code: "INVALID_QUESTION",
+                    message: "question 為必填欄位",
+                    retryable: false
+                }
+            });
+        }
+
+        // 經緯度為選填——沒有的話照樣能問（例如定位還沒取得），只是
+        // Gemini 會被明確告知「沒有位置資料」，不會因此亂猜地點。
+        const latitudeNumber = Number(latitude);
+        const longitudeNumber = Number(longitude);
+        const hasLocation =
+            Number.isFinite(latitudeNumber) &&
+            Number.isFinite(longitudeNumber) &&
+            latitudeNumber >= -90 &&
+            latitudeNumber <= 90 &&
+            longitudeNumber >= -180 &&
+            longitudeNumber <= 180;
+
+        if (!process.env.GEMINI_API_KEY) {
+            console.error("Missing GEMINI_API_KEY in backend/.env");
+
+            return res.status(500).json({
+                success: false,
+                error: {
+                    code: "MISSING_GEMINI_API_KEY",
+                    message: "伺服器未設定 GEMINI_API_KEY",
+                    retryable: false
+                }
+            });
+        }
+
+        // history 為選填，且不信任前端送來的內容——只挑出 role/text 都是
+        // 字串的項目，並限制最多取最近 20 輪（10 次問答），避免有人塞進
+        // 異常大的內容拖慢或拖垮 Gemini 請求。
+        const safeHistory = Array.isArray(history)
+            ? history
+                .filter(
+                    (turn) =>
+                        turn &&
+                        typeof turn.role === "string" &&
+                        typeof turn.text === "string"
+                )
+                .slice(-20)
+            : [];
+
+        let currentAddress = null;
+        let nearbyPlaces = [];
+
+        // Places 文字搜尋用的關鍵字，不是只用這一句問題——如果使用者是在
+        // 追問前一句（例如先問「附近有超商嗎」，接著說「那幫我導航過去」），
+        // 單獨看「那幫我導航過去」這句話，Google 完全查不到相關地點，會
+        // 讓這一輪的真實地點清單變成空的，使用者前一句問到的店反而被擋掉
+        // 沒辦法導航過去。把最近一句使用者說過的話也併進查詢文字，讓這種
+        // 常見的「先問有沒有、再說帶我去」的追問一樣查得到真實資料。
+        const lastUserHistoryText = safeHistory
+            .filter((turn) => turn.role === "user")
+            .map((turn) => turn.text)
+            .slice(-1)[0];
+        const placesQuery = lastUserHistoryText
+            ? `${lastUserHistoryText} ${question.trim()}`
+            : question.trim();
+
+        if (hasLocation) {
+            const [addressResult, placesResult] = await Promise.all([
+                requestGoogleApi(GOOGLE_GEOCODING_URL, {
+                    latlng: `${latitudeNumber},${longitudeNumber}`,
+                    language: "zh-TW",
+                    key: process.env.GOOGLE_MAPS_API_KEY
+                }).catch((error) => {
+                    console.error(
+                        "問問題時反查地址失敗，將以沒有地址資料的方式繼續:",
+                        error?.response?.data || error.message
+                    );
+                    return null;
+                }),
+                searchNearbyPlaces(
+                    latitudeNumber,
+                    longitudeNumber,
+                    placesQuery
+                )
+            ]);
+
+            currentAddress =
+                addressResult?.data?.results?.[0]?.formatted_address || null;
+            nearbyPlaces = placesResult;
+        }
+
+        const result = await askGemini(
+            question.trim(),
+            currentAddress,
+            nearbyPlaces,
+            safeHistory
+        );
+
+        if (result.type === "navigate") {
+            return res.status(200).json({
+                success: true,
+                action: "navigate",
+                destination_name: result.destinationName,
+                destination_address: result.destinationAddress
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            action: "speak",
+            answer: result.text
+        });
+
+    } catch (error) {
+        console.error(
+            "Assistant ask failed:",
+            error?.response?.data || error.message
+        );
+
+        return res.status(502).json({
+            success: false,
+            error: {
+                code: "ASSISTANT_REQUEST_FAILED",
+                message: "語音助理暫時無法回答，請稍後再試",
+                retryable: shouldRetry(error)
+            }
+        });
+    }
+});
 
 /* =========================================================
    找不到 API
